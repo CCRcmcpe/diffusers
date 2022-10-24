@@ -767,7 +767,7 @@ def main():
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
-            if global_step > 0 and not global_step % args.save_interval:
+            if global_step > 0 and not global_step % args.save_interval or global_step + 1 >= args.max_train_steps:
                 save_weights(global_step, epoch)
 
             progress_bar.update(1)
@@ -778,10 +778,7 @@ def main():
 
         accelerator.wait_for_everyone()
 
-    save_weights(global_step, args.num_train_epochs)
-
     accelerator.end_training()
-    wandb.finish()
 
 
 if __name__ == "__main__":
