@@ -649,11 +649,10 @@ def main():
         else:
             text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
         scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
-        unet_unwrap = accelerator.unwrap_model(unet)
 
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
-            unet=unet_unwrap.half() if args.save_unet_half else unet_unwrap,
+            unet=accelerator.unwrap_model(unet),
             text_encoder=text_enc_model,
             vae=AutoencoderKL.from_pretrained(args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path, use_auth_token=True),
             safety_checker=None,
