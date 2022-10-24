@@ -7,6 +7,7 @@ import os
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
+import shutil
 
 import torch
 import torch.nn.functional as F
@@ -689,7 +690,7 @@ def main():
                             aliases=['latest', 'last', f'epoch {epoch + 1}'])
 
             if args.rm_after_wandb_saved:
-                os.rmdir(save_dir)
+                shutil.rmtree(save_dir)
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
