@@ -241,6 +241,12 @@ def parse_args():
         action="store_true",
         help="Remove saved weights from local machine after uploaded to wandb. Useful in colab.",
     )
+    parser.add_argument(
+        "--save_unet_half",
+        default=False,
+        action="store_true",
+        help="Use half precision to save unet weights, saves storage.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -642,9 +648,11 @@ def main():
         else:
             text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
         scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+        unet = accelerator.unwrap_model(unet)
+
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
+            unet=unet.half() if args.save_unet_half else unet,
             text_encoder=text_enc_model,
             vae=AutoencoderKL.from_pretrained(args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path, use_auth_token=True),
             safety_checker=None,
