@@ -485,10 +485,10 @@ def main():
                     sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
                 ):
                     images = pipeline(prompt=example["prompt"][0][0],
-                        negative_prompt=example["prompt"][1][0],
-                        guidance_scale=args.guidance_scale,
-                        num_inference_steps=args.infer_steps,
-                        num_images_per_prompt=len(example["prompt"][0])).images
+                                      negative_prompt=example["prompt"][1][0],
+                                      guidance_scale=args.guidance_scale,
+                                      num_inference_steps=args.infer_steps,
+                                      num_images_per_prompt=len(example["prompt"][0])).images
 
                     for i, image in enumerate(images):
                         hash_image = hashlib.sha1(image.tobytes()).hexdigest()
