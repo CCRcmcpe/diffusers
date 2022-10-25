@@ -772,13 +772,17 @@ def main():
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
-            if global_step > 0 and not global_step % args.save_interval or global_step + 1 >= args.max_train_steps:
+            step_saved = False
+
+            if global_step > 0 and not global_step % args.save_interval:
                 save_weights(global_step, epoch)
+                step_saved = True
 
             progress_bar.update(1)
             global_step += 1
 
-            if global_step >= args.max_train_steps:
+            if global_step >= args.max_train_steps and not step_saved:
+                save_weights(global_step, epoch)
                 break
 
         accelerator.wait_for_everyone()
