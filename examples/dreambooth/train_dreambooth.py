@@ -237,6 +237,12 @@ def parse_args():
         help="Use wandb to watch training process.",
     )
     parser.add_argument(
+        "--wandb_artifact",
+        default=False,
+        action="store_true",
+        help="Upload saved weights to wandb.",
+    )
+    parser.add_argument(
         "--rm_after_wandb_saved",
         default=False,
         action="store_true",
@@ -679,7 +685,7 @@ def main():
                 torch.cuda.empty_cache()
         print(f"[*] Weights saved at {save_dir}")
 
-        if args.wandb:
+        if args.wandb and args.wandb_artifact:
             model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
                 'epochs_trained': epoch + 1,
                 'project': run.project
