@@ -359,9 +359,8 @@ class DreamBoothDataset(Dataset):
 class PromptDataset(Dataset):
     "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
 
-    def __init__(self, prompt, negative_prompt, num_samples):
+    def __init__(self, prompt, num_samples):
         self.prompt = prompt
-        self.negative_prompt = negative_prompt
         self.num_samples = num_samples
 
     def __len__(self):
@@ -370,7 +369,6 @@ class PromptDataset(Dataset):
     def __getitem__(self, index):
         example = {}
         example["prompt"] = self.prompt
-        example["negative_prompt"] = self.negative_prompt
         example["index"] = index
         return example
 
@@ -477,7 +475,7 @@ def main():
             num_new_images = args.num_class_images - cur_class_images
             logger.info(f"Number of class images to sample: {num_new_images}.")
 
-            sample_dataset = PromptDataset(concept["class_prompt"], concept["class_negative_prompt"], num_new_images)
+            sample_dataset = PromptDataset([concept["class_prompt"], concept["class_negative_prompt"]], num_new_images)
             sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=args.infer_batch_size)
 
             sample_dataloader = accelerator.prepare(sample_dataloader)
@@ -486,7 +484,9 @@ def main():
                 for example in tqdm(
                     sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
                 ):
-                    images = pipeline(prompt=example["prompt"], negative_prompt=example["negative_prompt"], guidance_scale=args.guidance_scale, num_inference_steps=args.infer_steps).images
+                    c = list(map(lambda x: x[0], example["prompt"]))
+                    uc = list(map(lambda x: x[1], example["prompt"]))
+                    images = pipeline(prompt=c, negative_prompt=uc, guidance_scale=args.guidance_scale, num_inference_steps=args.infer_steps).images
 
                     for i, image in enumerate(images):
                         hash_image = hashlib.sha1(image.tobytes()).hexdigest()
