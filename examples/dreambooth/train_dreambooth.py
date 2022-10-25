@@ -24,7 +24,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+import copy
 
 torch.backends.cudnn.benchmark = True
 
@@ -78,10 +78,23 @@ def parse_args():
         help="The prompt to specify images in the same class as provided instance images.",
     )
     parser.add_argument(
+        "--class_negative_prompt",
+        type=str,
+        default=None,
+        help="The negative prompt to specify images in the same class as provided instance images.",
+    )
+
+    parser.add_argument(
         "--save_sample_prompt",
         type=str,
         default=None,
-        help="The prompt used to generate sample outputs to save.",
+        help="The prompt used to generate sample outputs.",
+    )
+    parser.add_argument(
+        "--save_sample_negative_prompt",
+        type=str,
+        default=None,
+        help="The negative prompt used to generate sample outputs.",
     )
     parser.add_argument(
         "--n_save_sample",
@@ -89,18 +102,23 @@ def parse_args():
         default=4,
         help="The number of samples to save.",
     )
+
     parser.add_argument(
-        "--save_guidance_scale",
+        "--guidance_scale",
         type=float,
-        default=7.5,
-        help="CFG for save sample.",
+        default=11,
+        help="CFG for save sample and class images generation.",
     )
     parser.add_argument(
-        "--save_infer_steps",
+        "--infer_steps",
         type=int,
-        default=50,
-        help="The number of inference steps for save sample.",
+        default=28,
+        help="The number of inference steps for save sample and class images generation.",
     )
+    parser.add_argument(
+        "--infer_batch_size", type=int, default=4, help="Batch size (per device) for save sample and class images generation."
+    )
+
     parser.add_argument(
         "--with_prior_preservation",
         default=False,
@@ -139,9 +157,6 @@ def parse_args():
     parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
-    )
-    parser.add_argument(
-        "--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images."
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
@@ -344,8 +359,9 @@ class DreamBoothDataset(Dataset):
 class PromptDataset(Dataset):
     "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
 
-    def __init__(self, prompt, num_samples):
+    def __init__(self, prompt, negative_prompt, num_samples):
         self.prompt = prompt
+        self.negative_prompt = negative_prompt
         self.num_samples = num_samples
 
     def __len__(self):
@@ -354,6 +370,7 @@ class PromptDataset(Dataset):
     def __getitem__(self, index):
         example = {}
         example["prompt"] = self.prompt
+        example["negative_prompt"] = self.negative_prompt
         example["index"] = index
         return example
 
@@ -426,6 +443,7 @@ def main():
             {
                 "instance_prompt": args.instance_prompt,
                 "class_prompt": args.class_prompt,
+                "class_negative_prompt": args.class_negative_prompt,
                 "instance_data_dir": args.instance_data_dir,
                 "class_data_dir": args.class_data_dir
             }
@@ -441,37 +459,39 @@ def main():
             class_images_dir.mkdir(parents=True, exist_ok=True)
             cur_class_images = len(list(class_images_dir.iterdir()))
 
-            if cur_class_images < args.num_class_images:
-                torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
-                if pipeline is None:
-                    pipeline = StableDiffusionPipeline.from_pretrained(
-                        args.pretrained_model_name_or_path,
-                        vae=AutoencoderKL.from_pretrained(args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path, use_auth_token=True),
-                        torch_dtype=torch_dtype,
-                        safety_checker=None,
-                        use_auth_token=True
-                    )
-                    pipeline.set_progress_bar_config(disable=True)
-                    pipeline.to(accelerator.device)
+            if cur_class_images >= args.num_class_images:
+                break
 
-                num_new_images = args.num_class_images - cur_class_images
-                logger.info(f"Number of class images to sample: {num_new_images}.")
+            torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
+            if pipeline is None:
+                pipeline = StableDiffusionPipeline.from_pretrained(
+                    args.pretrained_model_name_or_path,
+                    vae=AutoencoderKL.from_pretrained(args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path, use_auth_token=True),
+                    torch_dtype=torch_dtype,
+                    safety_checker=None,
+                    use_auth_token=True
+                )
+                pipeline.set_progress_bar_config(disable=True)
+                pipeline.to(accelerator.device)
 
-                sample_dataset = PromptDataset(concept["class_prompt"], num_new_images)
-                sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=args.sample_batch_size)
+            num_new_images = args.num_class_images - cur_class_images
+            logger.info(f"Number of class images to sample: {num_new_images}.")
 
-                sample_dataloader = accelerator.prepare(sample_dataloader)
+            sample_dataset = PromptDataset(concept["class_prompt"], concept["class_negative_prompt"], num_new_images)
+            sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=args.infer_batch_size)
 
-                with torch.autocast("cuda"), torch.inference_mode():
-                    for example in tqdm(
-                        sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-                    ):
-                        images = pipeline(example["prompt"]).images
+            sample_dataloader = accelerator.prepare(sample_dataloader)
 
-                        for i, image in enumerate(images):
-                            hash_image = hashlib.sha1(image.tobytes()).hexdigest()
-                            image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
-                            image.save(image_filename)
+            with torch.autocast("cuda"), torch.inference_mode():
+                for example in tqdm(
+                    sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
+                ):
+                    images = pipeline(prompt=example["prompt"], negative_prompt=example["negative_prompt"], guidance_scale=args.guidance_scale, num_inference_steps=args.infer_steps).images
+
+                    for i, image in enumerate(images):
+                        hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                        image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                        image.save(image_filename)
 
         del pipeline
         if torch.cuda.is_available():
@@ -656,9 +676,14 @@ def main():
             text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
         scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
 
+        unet_unwrapped = accelerator.unwrap_model(unet)
+
+        if args.save_unet_half:
+            unet_unwrapped = copy.deepcopy(unet_unwrapped).half()
+
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
+            unet=unet_unwrapped,
             text_encoder=text_enc_model,
             vae=AutoencoderKL.from_pretrained(args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path, use_auth_token=True),
             safety_checker=None,
@@ -678,7 +703,7 @@ def main():
             os.makedirs(sample_dir, exist_ok=True)
             with torch.autocast("cuda"), torch.inference_mode():
                 for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
-                    images = pipeline(args.save_sample_prompt, guidance_scale=args.save_guidance_scale, num_inference_steps=args.save_infer_steps).images
+                    images = pipeline(prompt=args.save_sample_prompt, negative_prompt=args.save_sample_negative_prompt, guidance_scale=args.guidance_scale, num_inference_steps=args.infer_steps, num_images_per_prompt=args.infer_batch_size).images
                     images[0].save(os.path.join(sample_dir, f"{i}.png"))
             del pipeline
             if torch.cuda.is_available():
