@@ -484,9 +484,11 @@ def main():
                 for example in tqdm(
                     sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
                 ):
-                    c = list(map(lambda x: x[0], example["prompt"]))
-                    uc = list(map(lambda x: x[1], example["prompt"]))
-                    images = pipeline(prompt=c, negative_prompt=uc, guidance_scale=args.guidance_scale, num_inference_steps=args.infer_steps).images
+                    images = pipeline(prompt=example["prompt"][0][0],
+                        negative_prompt=example["prompt"][1][0],
+                        guidance_scale=args.guidance_scale,
+                        num_inference_steps=args.infer_steps,
+                        num_images_per_prompt=len(example["prompt"][0])).images
 
                     for i, image in enumerate(images):
                         hash_image = hashlib.sha1(image.tobytes()).hexdigest()
@@ -720,7 +722,7 @@ def main():
             })
             model_artifact.add_dir(save_dir)
             wandb.log_artifact(model_artifact,
-                            aliases=['latest', 'last', f'epoch {epoch + 1}'])
+                               aliases=['latest', 'last', f'epoch {epoch + 1}'])
 
             if args.rm_after_wandb_saved:
                 shutil.rmtree(save_dir)
