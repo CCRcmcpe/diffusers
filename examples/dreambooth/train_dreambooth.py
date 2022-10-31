@@ -269,6 +269,12 @@ def parse_args():
         action="store_true",
         help="Use half precision to save unet weights, saves storage.",
     )
+    parser.add_argument(
+        "--clip_skip",
+        type=int,
+        default=1,
+        help="A novel concept."
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -399,6 +405,26 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
+class CLIPWithSkip(CLIPTextModel):
+    def forward(self,
+                input_ids: Optional[torch.Tensor] = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                position_ids: Optional[torch.Tensor] = None,
+                output_attentions: Optional[bool] = None,
+                output_hidden_states: Optional[bool] = None,
+                return_dict: Optional[bool] = None,
+                hidden_state_index=-1):
+        use_clip_skip = hidden_state_index < -1
+
+        if not use_clip_skip:
+            return super().forward(input_ids, attention_mask, position_ids, output_attentions, output_hidden_states, return_dict)
+        
+        result = super().forward(input_ids, attention_mask, position_ids, output_attentions, output_hidden_states=use_clip_skip, return_dict=True)
+        embed = result.hidden_states[hidden_state_index]
+        embed = self.text_model.final_layer_norm(embed)
+        return embed
+
+
 def get_full_repo_name(model_id: str, organization: Optional[str] = None, token: Optional[str] = None):
     if token is None:
         token = HfFolder.get_token()
@@ -450,6 +476,21 @@ def main():
         with open(args.concepts_list, "r") as f:
             args.concepts_list = json.load(f)
 
+    # Load the tokenizer
+    if args.tokenizer_name:
+        tokenizer = CLIPTokenizer.from_pretrained(args.tokenizer_name)
+    elif args.pretrained_model_name_or_path:
+        tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", use_auth_token=True)
+
+    # Load models and create wrapper for stable diffusion
+    text_encoder = CLIPWithSkip.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
+    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", use_auth_token=True)
+    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", use_auth_token=True)
+
+    vae.requires_grad_(False)
+    if not args.train_text_encoder:
+        text_encoder.requires_grad_(False)
+
     if args.with_prior_preservation:
         pipeline = None
         for concept in args.concepts_list:
@@ -464,6 +505,7 @@ def main():
             if pipeline is None:
                 pipeline = StableDiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
+                    text_encoder=text_encoder,
                     vae=AutoencoderKL.from_pretrained(args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path, use_auth_token=True),
                     torch_dtype=torch_dtype,
                     safety_checker=None,
@@ -498,21 +540,6 @@ def main():
         del pipeline
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-    # Load the tokenizer
-    if args.tokenizer_name:
-        tokenizer = CLIPTokenizer.from_pretrained(args.tokenizer_name)
-    elif args.pretrained_model_name_or_path:
-        tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", use_auth_token=True)
-
-    # Load models and create wrapper for stable diffusion
-    text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", use_auth_token=True)
-    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", use_auth_token=True)
-
-    vae.requires_grad_(False)
-    if not args.train_text_encoder:
-        text_encoder.requires_grad_(False)
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -610,7 +637,7 @@ def main():
                 if args.train_text_encoder:
                     text_encoder_cache.append(batch["input_ids"])
                 else:
-                    text_encoder_cache.append(text_encoder(batch["input_ids"])[0])
+                    text_encoder_cache.append(text_encoder(batch["input_ids"], hidden_state_index=-args.clip_skip)[0])
         train_dataset = LatentsDataset(latents_cache, text_encoder_cache)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
 
@@ -675,7 +702,7 @@ def main():
         if args.train_text_encoder:
             text_enc_model = accelerator.unwrap_model(text_encoder)
         else:
-            text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
+            text_enc_model = CLIPWithSkip.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", use_auth_token=True)
         scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
 
         unet_unwrapped = accelerator.unwrap_model(unet)
@@ -758,11 +785,11 @@ def main():
                 with text_enc_context:
                     if not args.not_cache_latents:
                         if args.train_text_encoder:
-                            encoder_hidden_states = text_encoder(batch[0][1])[0]
+                            encoder_hidden_states = text_encoder(batch[0][1], hidden_state_index=-args.clip_skip)[0]
                         else:
                             encoder_hidden_states = batch[0][1]
                     else:
-                        encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                        encoder_hidden_states = text_encoder(batch["input_ids"], hidden_state_index=-args.clip_skip)[0]
 
                 # Predict the noise residual
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
