@@ -285,29 +285,52 @@ def create_ldm_bert_config(original_config):
     return config
 
 
-def convert_ldm_unet_checkpoint(checkpoint, config):
+def convert_ldm_unet_checkpoint(checkpoint, config, path=None, extract_ema=False):
     """
     Takes a state dict and a config, and returns a converted checkpoint.
     """
 
     # extract state_dict for UNet
     unet_state_dict = {}
-    unet_key = "model.diffusion_model."
     keys = list(checkpoint.keys())
+
+    unet_key = "model.diffusion_model."
+    # at least a 100 parameters have to start with `model_ema` in order for the checkpoint to be EMA
+    if sum(k.startswith("model_ema") for k in keys) > 100:
+        print(f"Checkpoint {path} has both EMA and non-EMA weights.")
+        if extract_ema:
+            print(
+                "In this conversion only the EMA weights are extracted. If you want to instead extract the non-EMA"
+                " weights (useful to continue fine-tuning), please make sure to remove the `--extract_ema` flag."
+            )
+            for key in keys:
+                if key.startswith("model.diffusion_model"):
+                    flat_ema_key = "model_ema." + "".join(key.split(".")[1:])
+                    unet_state_dict[key.replace(unet_key, "")] = checkpoint.pop(flat_ema_key)
+        else:
+            print(
+                "In this conversion only the non-EMA weights are extracted. If you want to instead extract the EMA"
+                " weights (usually better for inference), please make sure to add the `--extract_ema` flag."
+            )
+
     for key in keys:
         if key.startswith(unet_key):
             unet_state_dict[key.replace(unet_key, "")] = checkpoint.pop(key)
 
-    new_checkpoint = {"time_embedding.linear_1.weight": unet_state_dict["time_embed.0.weight"],
-                      "time_embedding.linear_1.bias": unet_state_dict["time_embed.0.bias"],
-                      "time_embedding.linear_2.weight": unet_state_dict["time_embed.2.weight"],
-                      "time_embedding.linear_2.bias": unet_state_dict["time_embed.2.bias"],
-                      "conv_in.weight": unet_state_dict["input_blocks.0.0.weight"],
-                      "conv_in.bias": unet_state_dict["input_blocks.0.0.bias"],
-                      "conv_norm_out.weight": unet_state_dict["out.0.weight"],
-                      "conv_norm_out.bias": unet_state_dict["out.0.bias"],
-                      "conv_out.weight": unet_state_dict["out.2.weight"],
-                      "conv_out.bias": unet_state_dict["out.2.bias"]}
+    new_checkpoint = {}
+
+    new_checkpoint["time_embedding.linear_1.weight"] = unet_state_dict["time_embed.0.weight"]
+    new_checkpoint["time_embedding.linear_1.bias"] = unet_state_dict["time_embed.0.bias"]
+    new_checkpoint["time_embedding.linear_2.weight"] = unet_state_dict["time_embed.2.weight"]
+    new_checkpoint["time_embedding.linear_2.bias"] = unet_state_dict["time_embed.2.bias"]
+
+    new_checkpoint["conv_in.weight"] = unet_state_dict["input_blocks.0.0.weight"]
+    new_checkpoint["conv_in.bias"] = unet_state_dict["input_blocks.0.0.bias"]
+
+    new_checkpoint["conv_norm_out.weight"] = unet_state_dict["out.0.weight"]
+    new_checkpoint["conv_norm_out.bias"] = unet_state_dict["out.0.bias"]
+    new_checkpoint["conv_out.weight"] = unet_state_dict["out.2.weight"]
+    new_checkpoint["conv_out.bias"] = unet_state_dict["out.2.bias"]
 
     # Retrieves the keys for the input blocks only
     num_input_blocks = len({".".join(layer.split(".")[:2]) for layer in unet_state_dict if "input_blocks" in layer})
@@ -446,24 +469,26 @@ def convert_ldm_vae_checkpoint(checkpoint, vae_path, config):
             if key.startswith(vae_key):
                 vae_state_dict[key.replace(vae_key, "")] = checkpoint.get(key)
 
-    
-    new_checkpoint = {"encoder.conv_in.weight": vae_state_dict["encoder.conv_in.weight"],
-                      "encoder.conv_in.bias": vae_state_dict["encoder.conv_in.bias"],
-                      "encoder.conv_out.weight": vae_state_dict["encoder.conv_out.weight"],
-                      "encoder.conv_out.bias": vae_state_dict["encoder.conv_out.bias"],
-                      "encoder.conv_norm_out.weight": vae_state_dict["encoder.norm_out.weight"],
-                      "encoder.conv_norm_out.bias": vae_state_dict["encoder.norm_out.bias"],
-                      "decoder.conv_in.weight": vae_state_dict["decoder.conv_in.weight"],
-                      "decoder.conv_in.bias": vae_state_dict["decoder.conv_in.bias"],
-                      "decoder.conv_out.weight": vae_state_dict["decoder.conv_out.weight"],
-                      "decoder.conv_out.bias": vae_state_dict["decoder.conv_out.bias"],
-                      "decoder.conv_norm_out.weight": vae_state_dict["decoder.norm_out.weight"],
-                      "decoder.conv_norm_out.bias": vae_state_dict["decoder.norm_out.bias"],
-                      "quant_conv.weight": vae_state_dict["quant_conv.weight"],
-                      "quant_conv.bias": vae_state_dict["quant_conv.bias"],
-                      "post_quant_conv.weight": vae_state_dict["post_quant_conv.weight"],
-                      "post_quant_conv.bias": vae_state_dict["post_quant_conv.bias"]}
- 
+    new_checkpoint = {}
+
+    new_checkpoint["encoder.conv_in.weight"] = vae_state_dict["encoder.conv_in.weight"]
+    new_checkpoint["encoder.conv_in.bias"] = vae_state_dict["encoder.conv_in.bias"]
+    new_checkpoint["encoder.conv_out.weight"] = vae_state_dict["encoder.conv_out.weight"]
+    new_checkpoint["encoder.conv_out.bias"] = vae_state_dict["encoder.conv_out.bias"]
+    new_checkpoint["encoder.conv_norm_out.weight"] = vae_state_dict["encoder.norm_out.weight"]
+    new_checkpoint["encoder.conv_norm_out.bias"] = vae_state_dict["encoder.norm_out.bias"]
+
+    new_checkpoint["decoder.conv_in.weight"] = vae_state_dict["decoder.conv_in.weight"]
+    new_checkpoint["decoder.conv_in.bias"] = vae_state_dict["decoder.conv_in.bias"]
+    new_checkpoint["decoder.conv_out.weight"] = vae_state_dict["decoder.conv_out.weight"]
+    new_checkpoint["decoder.conv_out.bias"] = vae_state_dict["decoder.conv_out.bias"]
+    new_checkpoint["decoder.conv_norm_out.weight"] = vae_state_dict["decoder.norm_out.weight"]
+    new_checkpoint["decoder.conv_norm_out.bias"] = vae_state_dict["decoder.norm_out.bias"]
+
+    new_checkpoint["quant_conv.weight"] = vae_state_dict["quant_conv.weight"]
+    new_checkpoint["quant_conv.bias"] = vae_state_dict["quant_conv.bias"]
+    new_checkpoint["post_quant_conv.weight"] = vae_state_dict["post_quant_conv.weight"]
+    new_checkpoint["post_quant_conv.bias"] = vae_state_dict["post_quant_conv.bias"]
 
     # Retrieves the keys for the encoder down blocks only
     num_down_blocks = len({".".join(layer.split(".")[:3]) for layer in vae_state_dict if "encoder.down" in layer})
@@ -603,7 +628,7 @@ def convert_ldm_clip_checkpoint(checkpoint):
         if key.startswith("cond_stage_model.transformer"):
             text_model_dict[key[len("cond_stage_model.transformer.") :]] = checkpoint[key]
 
-    text_model.load_state_dict(text_model_dict, strict=False)
+    text_model.load_state_dict(text_model_dict)
 
     return text_model
 
@@ -635,6 +660,15 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
         help="Use FP16 to store unet weights.",
+    )
+    parser.add_argument(
+        "--extract_ema",
+        action="store_true",
+        help=(
+            "Only relevant for checkpoints that have both EMA and non-EMA weights. Whether to extract the EMA weights"
+            " or not. Defaults to `False`. Add `--extract_ema` to extract the EMA weights. EMA weights usually yield"
+            " higher quality images for inference. Non-EMA weights are usually better to continue fine-tuning."
+        ),
     )
     parser.add_argument("--dump_path", default=None, type=str, required=True, help="Path to the output model.")
 
@@ -676,7 +710,9 @@ if __name__ == "__main__":
 
     # Convert the UNet2DConditionModel model.
     unet_config = create_unet_diffusers_config(original_config)
-    converted_unet_checkpoint = convert_ldm_unet_checkpoint(checkpoint, unet_config)
+    converted_unet_checkpoint = convert_ldm_unet_checkpoint(
+        checkpoint, unet_config, path=args.checkpoint_path, extract_ema=args.extract_ema
+    )
 
     unet = UNet2DConditionModel(**unet_config)
     unet.load_state_dict(converted_unet_checkpoint)
@@ -695,16 +731,16 @@ if __name__ == "__main__":
     if text_model_type == "FrozenCLIPEmbedder":
         text_model = convert_ldm_clip_checkpoint(checkpoint)
         tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-        #safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker")
-        #feature_extractor = AutoFeatureExtractor.from_pretrained("CompVis/stable-diffusion-safety-checker")
+#         safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker")
+#         feature_extractor = AutoFeatureExtractor.from_pretrained("CompVis/stable-diffusion-safety-checker")
         pipe = StableDiffusionPipeline(
             vae=vae,
             text_encoder=text_model,
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            #safety_checker=safety_checker,
-            #feature_extractor=feature_extractor,
+            #             safety_checker=safety_checker,
+            #             feature_extractor=feature_extractor,
         )
     else:
         text_config = create_ldm_bert_config(original_config)
