@@ -121,6 +121,12 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
+        "--pad_tokens",
+        default=False,
+        action="store_true",
+        help="Flag to pad tokens to length 77.",
+    )
+    parser.add_argument(
         "--with_prior_preservation",
         default=False,
         action="store_true",
