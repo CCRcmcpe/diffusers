@@ -540,6 +540,11 @@ def main(args):
 
         return result
 
+    vae = AutoencoderKL.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="vae"
+    )
+
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="unet"
