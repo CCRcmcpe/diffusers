@@ -1,34 +1,33 @@
 import argparse
+import copy
 import hashlib
 import itertools
-import random
 import json
 import math
 import os
+import random
+import shutil
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
-import shutil
 
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch.utils.data import Dataset
-
+from PIL import Image
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
-from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
-from PIL import Image
+from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-import copy
+
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers.optimization import get_scheduler
 
 torch.backends.cudnn.benchmark = True
-
 
 logger = get_logger(__name__)
 
@@ -117,7 +116,8 @@ def parse_args(input_args=None):
         help="The number of inference steps for save sample and class images generation.",
     )
     parser.add_argument(
-        "--infer_batch_size", type=int, default=4, help="Batch size (per device) for save sample and class images generation."
+        "--infer_batch_size", type=int, default=4,
+        help="Batch size (per device) for save sample and class images generation."
     )
 
     parser.add_argument(
@@ -245,7 +245,8 @@ def parse_args(input_args=None):
             "and an Nvidia Ampere GPU."
         ),
     )
-    parser.add_argument("--not_cache_latents", action="store_true", help="Do not precompute and cache latents from VAE.")
+    parser.add_argument("--not_cache_latents", action="store_true",
+                        help="Do not precompute and cache latents from VAE.")
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument(
         "--concepts_list",
@@ -303,14 +304,14 @@ class DreamBoothDataset(Dataset):
     """
 
     def __init__(
-        self,
-        concepts_list,
-        tokenizer,
-        with_prior_preservation=True,
-        size=512,
-        center_crop=False,
-        num_class_images=None,
-        pad_tokens=False
+            self,
+            concepts_list,
+            tokenizer,
+            with_prior_preservation=True,
+            size=512,
+            center_crop=False,
+            num_class_images=None,
+            pad_tokens=False
     ):
         self.size = size
         self.center_crop = center_crop
@@ -322,11 +323,13 @@ class DreamBoothDataset(Dataset):
         self.class_images_path = []
 
         for concept in concepts_list:
-            inst_img_path = [(x, concept["instance_prompt"]) for x in Path(concept["instance_data_dir"]).iterdir() if x.is_file()]
+            inst_img_path = [(x, concept["instance_prompt"]) for x in Path(concept["instance_data_dir"]).iterdir() if
+                             x.is_file()]
             self.instance_images_path.extend(inst_img_path)
 
             if with_prior_preservation:
-                class_img_path = [(x, concept["class_prompt"]) for x in Path(concept["class_data_dir"]).iterdir() if x.is_file()]
+                class_img_path = [(x, concept["class_prompt"]) for x in Path(concept["class_data_dir"]).iterdir() if
+                                  x.is_file()]
                 self.class_images_path.extend(class_img_path[:num_class_images])
 
         random.shuffle(self.instance_images_path)
@@ -502,7 +505,7 @@ def main(args):
 
             with torch.autocast("cuda"), torch.inference_mode():
                 for example in tqdm(
-                    sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
+                        sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
                 ):
                     images = pipeline(prompt=example["prompt"][0][0],
                                       negative_prompt=example["prompt"][1][0],
@@ -567,7 +570,7 @@ def main(args):
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+                args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
@@ -651,7 +654,8 @@ def main(args):
         text_encoder_cache = []
         for batch in tqdm(train_dataloader, desc="Caching latents"):
             with torch.no_grad():
-                batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, non_blocking=True, dtype=weight_dtype)
+                batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, non_blocking=True,
+                                                                 dtype=weight_dtype)
                 batch["input_ids"] = batch["input_ids"].to(accelerator.device, non_blocking=True)
                 latents_cache.append(vae.encode(batch["pixel_values"]).latent_dist)
                 if args.train_text_encoder:
@@ -659,7 +663,8 @@ def main(args):
                 else:
                     text_encoder_cache.append(encode_tokens(batch["input_ids"]))
         train_dataset = LatentsDataset(latents_cache, text_encoder_cache)
-        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x,
+                                                       shuffle=True)
 
         del vae
         if not args.train_text_encoder:
@@ -724,7 +729,8 @@ def main(args):
         else:
             text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
 
-        scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+        scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False,
+                                  set_alpha_to_one=False)
 
         unet_unwrapped = accelerator.unwrap_model(unet)
 
