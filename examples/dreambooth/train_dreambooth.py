@@ -668,9 +668,7 @@ def main(args):
     else:
         raise ValueError()
 
-    noise_scheduler = DDPMScheduler(
-        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
-    )
+    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     train_dataset = DreamBoothDataset(
         concepts_list=args.concepts_list,
