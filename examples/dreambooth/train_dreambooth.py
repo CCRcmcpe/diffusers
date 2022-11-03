@@ -853,17 +853,20 @@ def main(args):
                 torch.cuda.empty_cache()
         print(f"[*] Weights saved at {save_dir}")
 
-        if args.wandb and args.wandb_artifact:
-            model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
-                'epochs_trained': epoch + 1,
-                'project': run.project
-            })
-            model_artifact.add_dir(save_dir)
-            wandb.log_artifact(model_artifact,
-                               aliases=['latest', 'last', f'epoch {epoch + 1}'])
+        if args.wandb:
+            accelerator.log({"samples": [wandb.Image(x) for x in images]}, step=global_step)
 
-            if args.rm_after_wandb_saved:
-                shutil.rmtree(save_dir)
+            if args.wandb_artifact:
+                model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
+                    'epochs_trained': epoch + 1,
+                    'project': run.project
+                })
+                model_artifact.add_dir(save_dir)
+                wandb.log_artifact(model_artifact,
+                                aliases=['latest', 'last', f'epoch {epoch + 1}'])
+
+                if args.rm_after_wandb_saved:
+                    shutil.rmtree(save_dir)
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
