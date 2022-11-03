@@ -148,7 +148,7 @@ def parse_args(input_args=None):
         default="text-inversion-model",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--seed", type=int, default=None, help="A seed for (not so) reproducible training.")
     parser.add_argument(
         "--resolution",
         type=int,
