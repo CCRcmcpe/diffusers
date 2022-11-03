@@ -254,11 +254,18 @@ def parse_args(input_args=None):
         default=None,
         help="Path to json containing multiple concepts, will overwrite parameters like instance_prompt, class_prompt, etc.",
     )
+
     parser.add_argument(
         "--wandb",
         default=False,
         action="store_true",
         help="Use wandb to watch training process.",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="SD-Dreambooth-HF",
+        help="Project name in your wandb.",
     )
     parser.add_argument(
         "--wandb_artifact",
@@ -272,6 +279,7 @@ def parse_args(input_args=None):
         action="store_true",
         help="Remove saved weights from local machine after uploaded to wandb. Useful in colab.",
     )
+
     parser.add_argument(
         "--save_unet_half",
         default=False,
@@ -282,7 +290,7 @@ def parse_args(input_args=None):
         "--clip_skip",
         type=int,
         default=1,
-        help="A novel concept."
+        help="Stop At last [n] layers of CLIP model when training."
     )
 
     if input_args is not None:
@@ -434,15 +442,19 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
 
 def main(args):
     logging_dir = Path(args.output_dir, "0", args.logging_dir)
+
+    loggers = ["tensorboard"]
+
     if args.wandb:
         import wandb
-        run = wandb.init(project='SD-Dreambooth-HF')
+        run = wandb.init(project=args.wandb_project)
         wandb.config = vars(args)
+        loggers.append("wandb")
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with="wandb" if args.wandb else "tensorboard",
+        log_with=loggers,
         logging_dir=logging_dir,
     )
 
