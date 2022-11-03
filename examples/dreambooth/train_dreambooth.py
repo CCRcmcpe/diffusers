@@ -224,6 +224,18 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
+    parser.add_argument(
+        "--lr_cycles",
+        type=int,
+        default=None,
+        help='The number of restarts to use. Default is no restarts. Only works with "cosine" and "cosine_with_restarts" lr scheduler.'
+    )
+    parser.add_argument(
+        "--last_epoch",
+        type=int,
+        default=-1,
+        help='The index of the last epoch for resuming training. Only works with "cosine" and "cosine_with_restarts" lr scheduler.'
+    )
 
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
     parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
@@ -470,17 +482,20 @@ def get_optimizer_class(optimizer_name: str) -> Any:
                 "Failed to import Deepspeed"
             )
 
-    match optimizer_name.lower():
-        case "adamw":
-            return torch.optim.AdamW
-        case "adamw_8bit":
-            return try_import_bnb().optim.AdamW8bit
-        case "adamw_ds":
-            return try_import_ds().ops.adam.DeepSpeedCPUAdam
-        case "sgdm":
-            return torch.optim.sgd
-        case "sgdm_8bit":
-            return try_import_bnb().optim.SGD8bit
+    name = optimizer_name.lower()
+
+    if name == "adamw":
+        return torch.optim.AdamW
+    elif name == "adamw_8bit":
+        return try_import_bnb().optim.AdamW8bit
+    elif name == "adamw_ds":
+        return try_import_ds().ops.adam.DeepSpeedCPUAdam
+    elif name == "sgdm":
+        return torch.optim.sgd
+    elif name == "sgdm_8bit":
+        return try_import_bnb().optim.SGD8bit
+    else:
+        raise ValueError("WTF is that optimizer")
 
 
 def main(args):
@@ -650,6 +665,8 @@ def main(args):
             dampening=args.sgd_dampening,
             weight_decay=args.weight_decay
         )
+    else:
+        raise ValueError()
 
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000
@@ -733,11 +750,19 @@ def main(args):
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
+    if args.lr_cycles is None:
+        if args.lr_scheduler.lower() == "cosine":
+            args.lr_cycles = 0.5
+        if args.lr_scheduler.lower() == "cosine_with_restarts":
+            args.lr_cycles = 1
+
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
+        num_cycles=args.lr_cycles,
+        last_epoch=args.last_epoch
     )
 
     if args.train_text_encoder:
