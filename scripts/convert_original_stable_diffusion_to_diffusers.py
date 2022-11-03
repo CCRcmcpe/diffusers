@@ -667,6 +667,12 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--dump_path", default=None, type=str, required=True, help="Path to the output model.")
+    parser.add_argument(
+        "--vram",
+        default=True,
+        action="store_true",
+        help="Use VRAM. Useful if you are in something fuckery like Colab.",
+    )
 
     args = parser.parse_args()
 
@@ -677,7 +683,7 @@ if __name__ == "__main__":
         args.original_config_file = "./v1-inference.yaml"
 
     original_config = OmegaConf.load(args.original_config_file)
-    checkpoint = torch.load(args.checkpoint_path)
+    checkpoint = torch.load(args.checkpoint_path, map_location="cuda" if args.vram else "cpu")
     checkpoint = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
 
     num_train_timesteps = original_config.model.params.timesteps
