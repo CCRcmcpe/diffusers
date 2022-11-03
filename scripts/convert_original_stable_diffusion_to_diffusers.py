@@ -457,8 +457,8 @@ def convert_ldm_unet_checkpoint(checkpoint, config, path=None, extract_ema=False
     return new_checkpoint
 
 
-def convert_ldm_vae_checkpoint(checkpoint, vae_path, config):
-    if vae_path:
+def convert_ldm_vae_checkpoint(checkpoint, config, vae_path=None):
+    if vae_path is not None:
         vae_state_dict = torch.load(vae_path)['state_dict']
     else:
         # extract state dict for VAE
@@ -721,7 +721,7 @@ if __name__ == "__main__":
 
     # Convert the VAE model.
     vae_config = create_vae_diffusers_config(original_config)
-    converted_vae_checkpoint = convert_ldm_vae_checkpoint(checkpoint, args.vae_path, vae_config)
+    converted_vae_checkpoint = convert_ldm_vae_checkpoint(checkpoint, vae_config, args.vae_path)
 
     vae = AutoencoderKL(**vae_config)
     vae.load_state_dict(converted_vae_checkpoint)

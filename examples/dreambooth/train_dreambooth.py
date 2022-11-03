@@ -557,7 +557,8 @@ def main(args):
                 pipeline = StableDiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     vae=AutoencoderKL.from_pretrained(
-                        args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path
+                        args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                        subfolder=None if args.pretrained_vae_name_or_path else "vae"
                     ),
                     torch_dtype=torch_dtype,
                     safety_checker=None
