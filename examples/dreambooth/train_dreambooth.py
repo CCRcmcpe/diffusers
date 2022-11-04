@@ -730,6 +730,12 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
 
         return path_size_map
 
+    @staticmethod
+    def denormalize(img, mean=0.5, std=0.5):
+        res = transforms.Normalize((-1 * mean / std), (1.0 / std))(img.squeeze(0))
+        res = torch.clamp(res, 0, 1)
+        return res
+
     def transform(self, img, size, center_crop=False):
         x, y = img.size
         short, long = (x, y) if x <= y else (y, x)
@@ -758,9 +764,9 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
             print(x, y, w, h, "->", new_img.shape)
             import uuid, torchvision
             filename = str(uuid.uuid4())
-            torchvision.utils.save_image(new_img, f"/tmp/{filename}_1.jpg")
-            torchvision.utils.save_image(torchvision.transforms.ToTensor()(img), f"/tmp/{filename}_2.jpg")
-            print(f"saved: /tmp/{filename}")
+            torchvision.utils.save_image(torchvision.transforms.ToTensor()(img), f"/tmp/{filename}_orig.png")
+            torchvision.utils.save_image(self.denormalize(new_img), f"/tmp/{filename}_gen.png")
+            print(f"Saved sample: /tmp/{filename}")
 
         return new_img
 
@@ -937,7 +943,7 @@ def generate_class_images(args, accelerator):
 
 
 def main(args):
-    logging_dir = Path(args.output_dir, "0", args.logging_dir)
+    logging_dir = Path(args.output_dir, args.logging_dir)
 
     loggers = ["tensorboard"]
 
