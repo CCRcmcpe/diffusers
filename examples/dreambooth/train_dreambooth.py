@@ -715,7 +715,6 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
 
         # cache prompts for reading
         self.prompt_cache = {str(path): prompt for path, prompt in self.instance_entries + self.class_entries}
-        print(self.prompt_cache)
 
     def __len__(self):
         return self._length // self.bsz
@@ -776,9 +775,6 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
                 example["instance_images"] = self.transform(instance_image, size)
                 example["instance_prompt_ids"] = self.tokenize(instance_prompt)
 
-                print("BUCKET MAP")
-                print(self.class_bucket_path_map)
-
                 if self.with_prior_preservation:
                     if not (size in self.class_bucket_path_map and any(self.class_bucket_path_map[size])):
                         logger.info(
@@ -792,9 +788,6 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
                     else:
                         class_path = random.choice(self.class_bucket_path_map[size])
 
-                    print()
-                    print(class_path)
-                    print()
                     class_prompt = self.prompt_cache[class_path]
                     class_image = self.read_img(class_path)
                     example["class_images"] = self.transform(class_image, size)
