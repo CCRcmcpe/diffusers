@@ -367,9 +367,9 @@ def parse_args(input_args=None):
 class BucketManager:
     def __init__(self, id_size_map, max_size=(768, 512), divisible=64, step_size=8, min_dim=256, base_res=(512, 512),
                  bsz=1, world_size=1, global_rank=0, max_ar_error=4, seed=42, dim_limit=1024, debug=False):
-        self.res_map = id_size_map
+        self.id_size_map = id_size_map
         self.max_size = max_size
-        self.f = 8
+        self.f = step_size
         self.max_tokens = (max_size[0] / self.f) * (max_size[1] / self.f)
         self.div = divisible
         self.min_dim = min_dim
@@ -446,8 +446,8 @@ class BucketManager:
         self.aspect_errors = []
         skipped = 0
         skip_list = []
-        for post_id in self.res_map.keys():
-            w, h = self.res_map[post_id]
+        for post_id in self.id_size_map.keys():
+            w, h = self.id_size_map[post_id]
             aspect = float(w) / float(h)
             bucket_id = np.abs(self.aspects - aspect).argmin()
             if bucket_id not in self.buckets:
@@ -461,7 +461,7 @@ class BucketManager:
                 skipped += 1
                 skip_list.append(post_id)
         for post_id in skip_list:
-            del self.res_map[post_id]
+            del self.id_size_map[post_id]
         if self.debug:
             timer = time.perf_counter() - timer
             self.aspect_errors = np.array(self.aspect_errors)
@@ -482,7 +482,7 @@ class BucketManager:
             self.global_rank = global_rank
 
         # select ids for this epoch/rank
-        index = np.array(sorted(list(self.res_map.keys())))
+        index = np.array(sorted(list(self.id_size_map.keys())))
         index_len = index.shape[0]
         index = self.epoch_prng.permutation(index)
         index = index[:index_len - (index_len % (self.bsz * self.world_size))]
@@ -703,27 +703,28 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
     def __init__(self, bsz=1, debug=False, **kwargs):
         super().__init__(**kwargs)
         self.debug = debug
+        self.bsz = bsz
 
-        self.prompt_cache = {}
-
-        instance_id_size_map = self.get_path_size_map(str(item[0]) for item in self.instance_entries)
+        instance_id_size_map = self.get_path_size_map((str(item[0]) for item in self.instance_entries), "instance")
         self.instance_bucket_manager = BucketManager(instance_id_size_map, bsz=bsz, debug=debug).generator()
 
         if self.with_prior_preservation:
-            self.class_id_bucket_map = {}
-            class_id_size_map = self.get_path_size_map(str(item[0]) for item in self.class_entries)
+            self.class_bucket_path_map = {}
+            class_id_size_map = self.get_path_size_map((str(item[0]) for item in self.class_entries), "class")
             for batch, size in BucketManager(class_id_size_map, bsz=1, debug=debug).generator():
-                self.class_id_bucket_map.setdefault(size, []).extend([batch])
+                self.class_bucket_path_map.setdefault(size, []).extend([batch])
 
         # cache prompts for reading
-        for path, prompt in self.instance_entries + self.class_entries:
-            self.prompt_cache[path] = prompt
+        self.prompt_cache = {path: prompt for path, prompt in self.instance_entries + self.class_entries}
+
+    def __len__(self):
+        return self._length // self.bsz
 
     @staticmethod
-    def get_path_size_map(images_paths):
+    def get_path_size_map(images_paths, img_type):
         path_size_map = {}
 
-        for image_path in tqdm(images_paths, desc="Loading resolution from images"):
+        for image_path in tqdm(images_paths, desc=f"Loading resolution from {img_type} images"):
             with Image.open(image_path) as img:
                 size = img.size
             path_size_map[image_path] = size
@@ -776,14 +777,17 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
                 example["instance_prompt_ids"] = self.tokenize(instance_prompt)
 
                 if self.with_prior_preservation:
-                    if not any(self.class_id_bucket_map[size]):
-                        print(f"Warning: no class image with {size} exists. Will use instance image as is.")
-                        example["class_images"] = self.transform(instance_image, size)
-                        example["class_prompt_ids"] = self.tokenize(instance_prompt)
-                        result.append(example)
-                        continue
+                    if not (size in self.class_bucket_path_map and any(self.class_bucket_path_map[size])):
+                        logger.info(f"No class image with {size} exists. Will crop to the bucket with closest aspect ratio.")
 
-                    class_path = random.choice(self.class_id_bucket_map[size])
+                        kv = [(abs(k[0] / k[1] - size[0] / size[1]), v)
+                              for k, v in self.class_bucket_path_map.keys() if any(v)]
+                        kv.sort(key=lambda e: e[0])
+                        _, paths = kv[0]
+                        class_path = random.choice(paths)
+                    else:
+                        class_path = random.choice(self.class_bucket_path_map[size])
+
                     class_prompt = self.prompt_cache[class_path]
                     class_image = self.read_img(class_path)
                     example["class_images"] = self.transform(class_image, size)
@@ -1096,7 +1100,7 @@ def main(args):
 
     if args.use_aspect_ratio_bucket:
         args.not_cache_latents = True
-        print("Latents cache disabled.")
+        logger.warning("Latents cache disabled.")
 
         def collate_fn_wrap(examples):
             # workround for variable list
@@ -1258,7 +1262,7 @@ def main(args):
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        print(f"[*] Weights saved at {save_dir}")
+        logger.info(f"[*] Weights saved at {save_dir}")
 
         if args.wandb:
             accelerator.log({"samples": [wandb.Image(x) for x in images]}, step=global_step)
