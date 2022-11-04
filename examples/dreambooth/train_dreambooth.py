@@ -749,7 +749,7 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
             transforms.Resize((new_h, new_w), interpolation=transforms.InterpolationMode.BOX),
             transforms.CenterCrop((h, w)) if center_crop else transforms.RandomCrop((h, w)),
             transforms.ToTensor(),
-            transforms.Normalize([0.4], [0.5])
+            transforms.Normalize([0.5], [0.5])
         ])
 
         new_img = image_transforms(img)
@@ -777,11 +777,11 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
 
                 if self.with_prior_preservation:
                     if not any(self.class_id_bucket_map[size]):
-                        print(f"Warning: no image with {size} exists. Will use instance image as is.")
+                        print(f"Warning: no class image with {size} exists. Will use instance image as is.")
                         example["class_images"] = self.transform(instance_image, size)
                         example["class_prompt_ids"] = self.tokenize(instance_prompt)
                         result.append(example)
-                        yield result
+                        continue
 
                     class_path = random.choice(self.class_id_bucket_map[size])
                     class_prompt = self.prompt_cache[class_path]
@@ -1094,9 +1094,23 @@ def main(args):
         }
         return batch
 
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True
-    )
+    if args.use_aspect_ratio_bucket:
+        args.not_cache_latents = True
+        print("Latents cache disabled.")
+
+        def collate_fn_wrap(examples):
+            # workround for variable list
+            if len(examples) == 1:
+                examples = examples[0]
+            return collate_fn(examples)
+
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=1, collate_fn=collate_fn_wrap, pin_memory=True
+        )
+    else:
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True
+        )
 
     weight_dtype = torch.float32
     if args.mixed_precision == "fp16":
