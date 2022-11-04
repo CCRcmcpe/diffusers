@@ -6,11 +6,14 @@ import json
 import math
 import os
 import random
+import re
 import shutil
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional, Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -316,6 +319,39 @@ def parse_args(input_args=None):
         help="Stop At last [n] layers of CLIP model when training."
     )
 
+    parser.add_argument(
+        "--read_prompt_from_txt",
+        type=str,
+        default=None,
+        choices=["instance", "class", "both"],
+        help="Merge with extra prompt from txt."
+    )
+    parser.add_argument(
+        "--instance_insert_pos_regex",
+        type=str,
+        default=None,
+        help="The regex used to match instance prompt in txt, so instance_prompt will be inserted at the match index"
+    )
+    parser.add_argument(
+        "--class_insert_pos_regex",
+        type=str,
+        default=None,
+        help="The regex used to match class prompt in txt, so class_prompt will be inserted at the match index"
+    )
+
+    parser.add_argument(
+        "--use_aspect_ratio_bucket",
+        default=False,
+        action="store_true",
+        help="Use aspect ratio bucketing as image processing strategy, which may improve the quality of outputs. Use it with --not_cache_latents"
+    )
+    parser.add_argument(
+        "--debug_arb",
+        default=False,
+        action="store_true",
+        help="Enable debug logging on aspect ratio bucket."
+    )
+
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
@@ -326,6 +362,225 @@ def parse_args(input_args=None):
         args.local_rank = env_local_rank
 
     return args
+
+
+class BucketManager:
+    def __init__(self, id_size_map, max_size=(768, 512), divisible=64, step_size=8, min_dim=256, base_res=(512, 512),
+                 bsz=1, world_size=1, global_rank=0, max_ar_error=4, seed=42, dim_limit=1024, debug=False):
+        self.res_map = id_size_map
+        self.max_size = max_size
+        self.f = 8
+        self.max_tokens = (max_size[0] / self.f) * (max_size[1] / self.f)
+        self.div = divisible
+        self.min_dim = min_dim
+        self.dim_limit = dim_limit
+        self.base_res = base_res
+        self.bsz = bsz
+        self.world_size = world_size
+        self.global_rank = global_rank
+        self.max_ar_error = max_ar_error
+        self.prng = self.get_prng(seed)
+        epoch_seed = self.prng.tomaxint() % (2 ** 32 - 1)
+        self.epoch_prng = self.get_prng(epoch_seed)  # separate prng for sharding use for increased thread resilience
+        self.epoch = None
+        self.left_over = None
+        self.batch_total = None
+        self.batch_delivered = None
+
+        self.debug = debug
+
+        self.gen_buckets()
+        self.assign_buckets()
+        self.start_epoch()
+
+    @staticmethod
+    def get_prng(seed):
+        return np.random.RandomState(seed)
+
+    def gen_buckets(self):
+        if self.debug:
+            timer = time.perf_counter()
+        resolutions = []
+        aspects = []
+        w = self.min_dim
+        while (w / self.f) * (self.min_dim / self.f) <= self.max_tokens and w <= self.dim_limit:
+            h = self.min_dim
+            got_base = False
+            while (w / self.f) * ((h + self.div) / self.f) <= self.max_tokens and (h + self.div) <= self.dim_limit:
+                if w == self.base_res[0] and h == self.base_res[1]:
+                    got_base = True
+                h += self.div
+            if (w != self.base_res[0] or h != self.base_res[1]) and got_base:
+                resolutions.append(self.base_res)
+                aspects.append(1)
+            resolutions.append((w, h))
+            aspects.append(float(w) / float(h))
+            w += self.div
+        h = self.min_dim
+        while (h / self.f) * (self.min_dim / self.f) <= self.max_tokens and h <= self.dim_limit:
+            w = self.min_dim
+            got_base = False
+            while (h / self.f) * ((w + self.div) / self.f) <= self.max_tokens and (w + self.div) <= self.dim_limit:
+                if w == self.base_res[0] and h == self.base_res[1]:
+                    got_base = True
+                w += self.div
+            resolutions.append((w, h))
+            aspects.append(float(w) / float(h))
+            h += self.div
+        res_map = {}
+        for i, res in enumerate(resolutions):
+            res_map[res] = aspects[i]
+        self.resolutions = sorted(res_map.keys(), key=lambda x: x[0] * 4096 - x[1])
+        self.aspects = np.array(list(map(lambda x: res_map[x], self.resolutions)))
+        self.resolutions = np.array(self.resolutions)
+        if self.debug:
+            timer = time.perf_counter() - timer
+            print(f"resolutions:\n{self.resolutions}")
+            print(f"aspects:\n{self.aspects}")
+            print(f"gen_buckets: {timer:.5f}s")
+
+    def assign_buckets(self):
+        if self.debug:
+            timer = time.perf_counter()
+        self.buckets = {}
+        self.aspect_errors = []
+        skipped = 0
+        skip_list = []
+        for post_id in self.res_map.keys():
+            w, h = self.res_map[post_id]
+            aspect = float(w) / float(h)
+            bucket_id = np.abs(self.aspects - aspect).argmin()
+            if bucket_id not in self.buckets:
+                self.buckets[bucket_id] = []
+            error = abs(self.aspects[bucket_id] - aspect)
+            if error < self.max_ar_error:
+                self.buckets[bucket_id].append(post_id)
+                if self.debug:
+                    self.aspect_errors.append(error)
+            else:
+                skipped += 1
+                skip_list.append(post_id)
+        for post_id in skip_list:
+            del self.res_map[post_id]
+        if self.debug:
+            timer = time.perf_counter() - timer
+            self.aspect_errors = np.array(self.aspect_errors)
+            print(f"skipped images: {skipped}")
+            print(
+                f"aspect error: mean {self.aspect_errors.mean()}, median {np.median(self.aspect_errors)}, max {self.aspect_errors.max()}")
+            for bucket_id in reversed(sorted(self.buckets.keys(), key=lambda b: len(self.buckets[b]))):
+                print(
+                    f"bucket {bucket_id}: {self.resolutions[bucket_id]}, aspect {self.aspects[bucket_id]:.5f}, entries {len(self.buckets[bucket_id])}")
+            print(f"assign_buckets: {timer:.5f}s")
+
+    def start_epoch(self, world_size=None, global_rank=None):
+        if self.debug:
+            timer = time.perf_counter()
+        if world_size is not None:
+            self.world_size = world_size
+        if global_rank is not None:
+            self.global_rank = global_rank
+
+        # select ids for this epoch/rank
+        index = np.array(sorted(list(self.res_map.keys())))
+        index_len = index.shape[0]
+        index = self.epoch_prng.permutation(index)
+        index = index[:index_len - (index_len % (self.bsz * self.world_size))]
+        # print("perm", self.global_rank, index[0:16])
+        index = index[self.global_rank::self.world_size]
+        self.batch_total = index.shape[0] // self.bsz
+        assert (index.shape[0] % self.bsz == 0)
+        index = set(index)
+
+        self.epoch = {}
+        self.left_over = []
+        self.batch_delivered = 0
+        for bucket_id in sorted(self.buckets.keys()):
+            if len(self.buckets[bucket_id]) > 0:
+                self.epoch[bucket_id] = np.array([post_id for post_id in self.buckets[bucket_id] if post_id in index],
+                                                 dtype=np.int64)
+                self.prng.shuffle(self.epoch[bucket_id])
+                self.epoch[bucket_id] = list(self.epoch[bucket_id])
+                overhang = len(self.epoch[bucket_id]) % self.bsz
+                if overhang != 0:
+                    self.left_over.extend(self.epoch[bucket_id][:overhang])
+                    self.epoch[bucket_id] = self.epoch[bucket_id][overhang:]
+                if len(self.epoch[bucket_id]) == 0:
+                    del self.epoch[bucket_id]
+
+        if self.debug:
+            timer = time.perf_counter() - timer
+            count = 0
+            for bucket_id in self.epoch.keys():
+                count += len(self.epoch[bucket_id])
+            print(f"correct item count: {count == len(index)} ({count} of {len(index)})")
+            print(f"start_epoch: {timer:.5f}s")
+
+    def get_batch(self):
+        if self.debug:
+            timer = time.perf_counter()
+        # check if no data left or no epoch initialized
+        if self.epoch is None or self.left_over is None or (
+                len(self.left_over) == 0 and not bool(self.epoch)) or self.batch_total == self.batch_delivered:
+            self.start_epoch()
+
+        found_batch = False
+        batch_data = None
+        resolution = self.base_res
+        while not found_batch:
+            bucket_ids = list(self.epoch.keys())
+            if len(self.left_over) >= self.bsz:
+                bucket_probs = [len(self.left_over)] + [len(self.epoch[bucket_id]) for bucket_id in bucket_ids]
+                bucket_ids = [-1] + bucket_ids
+            else:
+                bucket_probs = [len(self.epoch[bucket_id]) for bucket_id in bucket_ids]
+            bucket_probs = np.array(bucket_probs, dtype=np.float32)
+            bucket_lens = bucket_probs
+            bucket_probs = bucket_probs / bucket_probs.sum()
+            bucket_ids = np.array(bucket_ids, dtype=np.int64)
+            if bool(self.epoch):
+                chosen_id = int(self.prng.choice(bucket_ids, 1, p=bucket_probs)[0])
+            else:
+                chosen_id = -1
+
+            if chosen_id == -1:
+                # using leftover images that couldn't make it into a bucketed batch and returning them for use with basic square image
+                self.prng.shuffle(self.left_over)
+                batch_data = self.left_over[:self.bsz]
+                self.left_over = self.left_over[self.bsz:]
+                found_batch = True
+            else:
+                if len(self.epoch[chosen_id]) >= self.bsz:
+                    # return bucket batch and resolution
+                    batch_data = self.epoch[chosen_id][:self.bsz]
+                    self.epoch[chosen_id] = self.epoch[chosen_id][self.bsz:]
+                    resolution = tuple(self.resolutions[chosen_id])
+                    found_batch = True
+                    if len(self.epoch[chosen_id]) == 0:
+                        del self.epoch[chosen_id]
+                else:
+                    # can't make a batch from this, not enough images. move them to leftovers and try again
+                    self.left_over.extend(self.epoch[chosen_id])
+                    del self.epoch[chosen_id]
+
+            assert (found_batch or len(self.left_over) >= self.bsz or bool(self.epoch))
+
+        if self.debug:
+            timer = time.perf_counter() - timer
+            print(f"bucket probs: " + ", ".join(map(lambda x: f"{x:.2f}", list(bucket_probs * 100))))
+            print(f"chosen id: {chosen_id}")
+            print(f"batch data: {batch_data}")
+            print(f"resolution: {resolution}")
+            print(f"get_batch: {timer:.5f}s")
+
+        self.batch_delivered += 1
+        return (batch_data, resolution)
+
+    def generator(self):
+        if self.batch_delivered >= self.batch_total:
+            self.start_epoch()
+        while self.batch_delivered < self.batch_total:
+            yield self.get_batch()
 
 
 class DreamBoothDataset(Dataset):
@@ -342,7 +597,10 @@ class DreamBoothDataset(Dataset):
             size=512,
             center_crop=False,
             num_class_images=None,
-            pad_tokens=False
+            pad_tokens=False,
+            read_prompt_from_txt=None,
+            instance_insert_pos_regex=None,
+            class_insert_pos_regex=None,
     ):
         self.size = size
         self.center_crop = center_crop
@@ -350,64 +608,189 @@ class DreamBoothDataset(Dataset):
         self.with_prior_preservation = with_prior_preservation
         self.pad_tokens = pad_tokens
 
-        self.instance_images_path = []
-        self.class_images_path = []
+        self.instance_entries = []
+        self.class_entries = []
+
+        def combine_prompt(default_prompt, txt_prompt, prompt_type):
+            match = None
+
+            if prompt_type == "instance" and instance_insert_pos_regex is not None:
+                match = re.search(instance_insert_pos_regex, txt_prompt)
+            elif prompt_type == "class" and class_insert_pos_regex is not None:
+                match = re.search(class_insert_pos_regex, txt_prompt)
+
+            if match is None:
+                return default_prompt + " " + txt_prompt
+
+            idx = match.span()[0]
+            return txt_prompt[:idx] + default_prompt + (" " + txt_prompt[idx:]) if len(txt_prompt[idx:]) > 0 else ""
+
+        def prompt_resolver(x, default, prompt_type):
+            entry = (x, default)
+
+            if read_prompt_from_txt is None or read_prompt_from_txt != prompt_type and read_prompt_from_txt != "both":
+                return entry
+
+            content = Path(x).with_suffix('.txt').read_text()
+            combined_prompt = combine_prompt(default, content, prompt_type)
+
+            entry = (x, combined_prompt)
+
+            return entry
 
         for concept in concepts_list:
-            inst_img_path = [(x, concept["instance_prompt"]) for x in Path(concept["instance_data_dir"]).iterdir() if
+            inst_img_path = [prompt_resolver(x, concept["instance_prompt"], "instance") for x in
+                             Path(concept["instance_data_dir"]).iterdir() if
                              x.is_file()]
-            self.instance_images_path.extend(inst_img_path)
+            self.instance_entries.extend(inst_img_path)
 
             if with_prior_preservation:
-                class_img_path = [(x, concept["class_prompt"]) for x in Path(concept["class_data_dir"]).iterdir() if
+                class_img_path = [prompt_resolver(x, concept["class_prompt"], "class") for x in
+                                  Path(concept["class_data_dir"]).iterdir() if
                                   x.is_file()]
-                self.class_images_path.extend(class_img_path[:num_class_images])
+                self.class_entries.extend(class_img_path[:num_class_images])
 
-        random.shuffle(self.instance_images_path)
-        self.num_instance_images = len(self.instance_images_path)
-        self.num_class_images = len(self.class_images_path)
+        random.shuffle(self.instance_entries)
+        self.num_instance_images = len(self.instance_entries)
+        self.num_class_images = len(self.class_entries)
         self._length = max(self.num_class_images, self.num_instance_images)
 
         self.image_transforms = transforms.Compose(
             [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.Resize(size, interpolation=transforms.InterpolationMode.BOX),
                 transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
 
-    def __len__(self):
-        return self._length
+    @staticmethod
+    def read_img(filepath) -> Image:
+        img = Image.open(filepath)
 
-    def __getitem__(self, index):
-        example = {}
-        instance_path, instance_prompt = self.instance_images_path[index % self.num_instance_images]
-        instance_image = Image.open(instance_path)
-        if not instance_image.mode == "RGB":
-            instance_image = instance_image.convert("RGB")
-        example["instance_images"] = self.image_transforms(instance_image)
-        example["instance_prompt_ids"] = self.tokenizer(
-            instance_prompt,
+        if not img.mode == "RGB":
+            img = img.convert("RGB")
+        return img
+
+    def tokenize(self, prompt):
+        return self.tokenizer(
+            prompt,
             padding="max_length" if self.pad_tokens else "do_not_pad",
             truncation=True,
             max_length=self.tokenizer.model_max_length,
         ).input_ids
 
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, index):
+        example = {}
+        instance_path, instance_prompt = self.instance_entries[index % self.num_instance_images]
+        instance_image = self.read_img(instance_path)
+        example["instance_images"] = self.image_transforms(instance_image)
+        example["instance_prompt_ids"] = self.tokenize(instance_prompt)
+
         if self.with_prior_preservation:
-            class_path, class_prompt = self.class_images_path[index % self.num_class_images]
-            class_image = Image.open(class_path)
-            if not class_image.mode == "RGB":
-                class_image = class_image.convert("RGB")
+            class_path, class_prompt = self.class_entries[index % self.num_class_images]
+            class_image = self.read_img(class_path)
             example["class_images"] = self.image_transforms(class_image)
-            example["class_prompt_ids"] = self.tokenizer(
-                class_prompt,
-                padding="max_length" if self.pad_tokens else "do_not_pad",
-                truncation=True,
-                max_length=self.tokenizer.model_max_length,
-            ).input_ids
+            example["class_prompt_ids"] = self.tokenize(class_prompt)
 
         return example
+
+
+class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDataset):
+    def __init__(self, bsz=1, debug=False, **kwargs):
+        super().__init__(**kwargs)
+        self.debug = debug
+
+        self.prompt_cache = {}
+
+        instance_id_size_map = self.get_path_size_map(str(item[0]) for item in self.instance_entries)
+        self.instance_bucket_manager = BucketManager(instance_id_size_map, bsz=bsz, debug=debug).generator()
+
+        if self.with_prior_preservation:
+            self.class_id_bucket_map = {}
+            class_id_size_map = self.get_path_size_map(str(item[0]) for item in self.class_entries)
+            for batch, size in BucketManager(class_id_size_map, bsz=1, debug=debug).generator():
+                self.class_id_bucket_map.setdefault(size, []).extend([batch])
+
+        # cache prompts for reading
+        for path, prompt in self.instance_entries + self.class_entries:
+            self.prompt_cache[path] = prompt
+
+    @staticmethod
+    def get_path_size_map(images_paths):
+        path_size_map = {}
+
+        for image_path in tqdm(images_paths, desc="Loading resolution from images"):
+            with Image.open(image_path) as img:
+                size = img.size
+            path_size_map[image_path] = size
+
+        return path_size_map
+
+    def transform(self, img, size, center_crop=False):
+        x, y = img.size
+        short, long = (x, y) if x <= y else (y, x)
+
+        w, h = size
+        min_crop, max_crop = (w, h) if w <= h else (h, w)
+        ratio_src, ratio_dst = int(long / short), int(max_crop / min_crop)
+
+        if ratio_src > ratio_dst:
+            new_w, new_h = (min_crop, int(min_crop * ratio_src)) if x < y else (int(min_crop * ratio_src), min_crop)
+        elif ratio_src < ratio_dst:
+            new_w, new_h = (max_crop, int(max_crop / ratio_src)) if x > y else (int(max_crop / ratio_src), max_crop)
+        else:
+            new_w, new_h = w, h
+
+        image_transforms = transforms.Compose([
+            transforms.Resize((new_h, new_w), interpolation=transforms.InterpolationMode.BOX),
+            transforms.CenterCrop((h, w)) if center_crop else transforms.RandomCrop((h, w)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.4], [0.5])
+        ])
+
+        new_img = image_transforms(img)
+
+        if self.debug:
+            print(x, y, w, h, "->", new_img.shape)
+            import uuid, torchvision
+            filename = str(uuid.uuid4())
+            torchvision.utils.save_image(new_img, f"/tmp/{filename}_1.jpg")
+            torchvision.utils.save_image(torchvision.transforms.ToTensor()(img), f"/tmp/{filename}_2.jpg")
+            print(f"saved: /tmp/{filename}")
+
+        return new_img
+
+    def __iter__(self):
+        for batch, size in self.instance_bucket_manager:
+            result = []
+
+            for instance_path in batch:
+                example = {}
+                instance_prompt = self.prompt_cache[instance_path]
+                instance_image = self.read_img(instance_path)
+                example["instance_images"] = self.transform(instance_image, size)
+                example["instance_prompt_ids"] = self.tokenize(instance_prompt)
+
+                if self.with_prior_preservation:
+                    if not any(self.class_id_bucket_map[size]):
+                        print(f"Warning: no image with {size} exists. Will use instance image as is.")
+                        example["class_images"] = self.transform(instance_image, size)
+                        example["class_prompt_ids"] = self.tokenize(instance_prompt)
+                        result.append(example)
+                        yield result
+
+                    class_path = random.choice(self.class_id_bucket_map[size])
+                    class_prompt = self.prompt_cache[class_path]
+                    class_image = self.read_img(class_path)
+                    example["class_images"] = self.transform(class_image, size)
+                    example["class_prompt_ids"] = self.tokenize(class_prompt)
+
+                result.append(example)
+            yield result
 
 
 class PromptDataset(Dataset):
@@ -545,7 +928,6 @@ def generate_class_images(args, accelerator):
                     image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
                     image.save(image_filename)
 
-    del pipeline
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -671,18 +1053,24 @@ def main(args):
             weight_decay=args.weight_decay
         )
     else:
-        raise ValueError()
+        raise ValueError(args.optimizer)
 
     noise_scheduler = DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
-    train_dataset = DreamBoothDataset(
+    dataset_class = DreamBoothDatasetWithARB if args.use_aspect_ratio_bucket else DreamBoothDataset
+    train_dataset = dataset_class(
         concepts_list=args.concepts_list,
         tokenizer=tokenizer,
         with_prior_preservation=args.with_prior_preservation,
         size=args.resolution,
         center_crop=args.center_crop,
         num_class_images=args.num_class_images,
-        pad_tokens=args.pad_tokens
+        pad_tokens=args.pad_tokens,
+        read_prompt_from_txt=args.read_prompt_from_txt,
+        instance_insert_pos_regex=args.instance_insert_pos_regex,
+        class_insert_pos_regex=args.class_insert_pos_regex,
+        bsz=args.train_batch_size,
+        debug=args.debug_arb,
     )
 
     def collate_fn(examples):
