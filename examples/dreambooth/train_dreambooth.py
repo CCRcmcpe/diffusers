@@ -601,6 +601,7 @@ class DreamBoothDataset(Dataset):
             read_prompt_from_txt=None,
             instance_insert_pos_regex=None,
             class_insert_pos_regex=None,
+            **kwargs
     ):
         self.size = size
         self.center_crop = center_crop
@@ -700,18 +701,18 @@ class DreamBoothDataset(Dataset):
 
 
 class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDataset):
-    def __init__(self, bsz=1, debug=False, **kwargs):
+    def __init__(self, bsz=1, seed=69, debug=False, **kwargs):
         super().__init__(**kwargs)
         self.debug = debug
         self.bsz = bsz
 
         instance_id_size_map = self.get_path_size_map((str(item[0]) for item in self.instance_entries), "instance")
-        self.instance_bucket_manager = BucketManager(instance_id_size_map, bsz=bsz, debug=debug).generator()
+        self.instance_bucket_manager = BucketManager(instance_id_size_map, bsz=bsz, seed=seed, debug=debug).generator()
 
         if self.with_prior_preservation:
             self.class_bucket_path_map = {}
             class_id_size_map = self.get_path_size_map((str(item[0]) for item in self.class_entries), "class")
-            for batch, size in BucketManager(class_id_size_map, bsz=1, debug=debug).generator():
+            for batch, size in BucketManager(class_id_size_map, bsz=1, seed=seed, debug=debug).generator():
                 self.class_bucket_path_map.setdefault(size, []).extend([batch])
 
         # cache prompts for reading
@@ -1075,6 +1076,7 @@ def main(args):
         class_insert_pos_regex=args.class_insert_pos_regex,
         bsz=args.train_batch_size,
         debug=args.debug_arb,
+        seed=args.seed,
     )
 
     def collate_fn(examples):
