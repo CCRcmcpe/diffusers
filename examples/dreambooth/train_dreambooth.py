@@ -1,4 +1,5 @@
 import argparse
+import atexit
 import copy
 import hashlib
 import itertools
@@ -17,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import yaml
 from PIL import Image
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -30,6 +32,11 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 
+try:
+    from yaml import CLoader as Loader, CDumper as Dumper
+except ImportError:
+    from yaml import Loader, Dumper
+
 torch.backends.cudnn.benchmark = True
 
 logger = get_logger(__name__)
@@ -41,7 +48,6 @@ def parse_args(input_args=None):
         "--pretrained_model_name_or_path",
         type=str,
         default=None,
-        required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
@@ -352,10 +358,45 @@ def parse_args(input_args=None):
         help="Enable debug logging on aspect ratio bucket."
     )
 
+    parser.add_argument(
+        "--resume",
+        default=False,
+        action="store_true",
+        help="Resume training. Loads last checkpoint in output if model is not specified. You cannot specify this through config."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Read args from yaml config file. Command line args have higher priority and will override yaml.",
+    )
+
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
+
+    if args.resume:
+        ckpts = [(int(x.name), x) for x in Path(args.output_dir).iterdir() if x.is_dir() and x.name.isdigit()]
+
+        if not any(ckpts):
+            raise ValueError("A model is needed.")
+
+        ckpts.sort(key=lambda e: e[0], reverse=True)
+        latest_path = ckpts[0][1]
+        args.pretrained_model_name_or_path = str(latest_path)
+
+        config = latest_path / "state" / "args.yaml"
+        if args.config is None and config.is_file():
+            args.config = str(config)
+    elif args.pretrained_model_name_or_path is None:
+        raise ValueError("A model is needed.")
+
+    if Path(args.config).is_file():
+        with open(args.config, 'r') as f:
+            config = yaml.load(f, Loader)
+        config.update(args.__dict__)
+        args.__dict__ = config
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -787,7 +828,7 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
                             f"No class image with {size} exists. Will crop to the bucket with closest aspect ratio.")
 
                         kv = [(abs(k[0] / k[1] - size[0] / size[1]), v)
-                              for k, v in self.class_bucket_path_map.keys() if any(v)]
+                              for k, v in self.class_bucket_path_map.items() if any(v)]
                         kv.sort(key=lambda e: e[0])
                         _, paths = kv[0]
                         class_path = random.choice(paths)
@@ -1065,6 +1106,15 @@ def main(args):
     else:
         raise ValueError(args.optimizer)
 
+    base_step = 0
+    base_epoch = 0
+
+    if args.resume:
+        checkpoint = torch.load(os.path.join(args.pretrained_model_name_or_path, "state", "state.pt"))
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        base_step = checkpoint["total_steps"]
+        base_epoch = checkpoint["total_epoch"]
+
     noise_scheduler = DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     dataset_class = DreamBoothDatasetWithARB if args.use_aspect_ratio_bucket else DreamBoothDataset
@@ -1214,7 +1264,7 @@ def main(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
-    def save_weights(step, epoch):
+    def save_weights():
         # Create the pipeline using using the trained modules and save it.
         if not accelerator.is_main_process:
             return
@@ -1244,10 +1294,24 @@ def main(args):
             scheduler=scheduler,
             torch_dtype=torch.float16
         )
-        save_dir = os.path.join(args.output_dir, f"{step}")
+
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(exist_ok=True)
+
+        save_dir = output_dir / f"{global_step}"
         pipeline.save_pretrained(save_dir)
-        with open(os.path.join(save_dir, "args.json"), "w") as f:
-            json.dump(args.__dict__, f, indent=2)
+
+        state_dir = save_dir / "state"
+        state_dir.mkdir()
+
+        with open(state_dir / "args.yaml", "w") as f:
+            yaml.dump(args.__dict__, f, Dumper, indent=2)
+
+        torch.save({
+            'optimizer_state_dict': optimizer.state_dict(),
+            "global_steps": global_step,
+            'global_epoch': global_epoch,
+        }, state_dir / "state.pt")
 
         if args.save_sample_prompt is not None:
             pipeline = pipeline.to(accelerator.device)
@@ -1272,26 +1336,34 @@ def main(args):
         logger.info(f"[*] Weights saved at {save_dir}")
 
         if args.wandb:
-            accelerator.log({"samples": [wandb.Image(x) for x in images]}, step=global_step)
+            if args.wandb_sample:
+                accelerator.log({"samples": [wandb.Image(x) for x in images]}, step=global_step)
 
             if args.wandb_artifact:
                 model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
-                    'epochs_trained': epoch + 1,
+                    'epochs_trained': global_epoch + 1,
                     'project': run.project
                 })
-                model_artifact.add_dir(save_dir)
+                model_artifact.add_dir(str(save_dir))
                 wandb.log_artifact(model_artifact,
-                                   aliases=['latest', 'last', f'epoch {epoch + 1}'])
+                                   aliases=['latest', 'last', f'epoch {global_epoch + 1}'])
 
                 if args.rm_after_wandb_saved:
                     shutil.rmtree(save_dir)
 
+    @atexit.register
+    def on_exit():
+        if 100 < step < args.max_train_steps:
+            print("Saving model...")
+            save_weights()
+
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
-    global_step = 0
+    step = 0
     loss_avg = AverageMeter()
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
+
     for epoch in range(args.num_train_epochs):
         unet.train()
         if args.train_text_encoder:
@@ -1359,21 +1431,24 @@ def main(args):
                 optimizer.zero_grad(set_to_none=True)
                 loss_avg.update(loss.detach_(), bsz)
 
-            logs = {"epoch": epoch + 1, "loss": loss_avg.avg.item(), "lr": lr_scheduler.get_last_lr()[0]}
+            global_step = base_step + step
+            global_epoch = base_epoch + epoch
+
+            logs = {"epoch": global_epoch + 1, "loss": loss_avg.avg.item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
             step_saved = False
 
-            if global_step > 0 and not global_step % args.save_interval:
-                save_weights(global_step, epoch)
+            if step > 0 and not step % args.save_interval:
+                save_weights()
                 step_saved = True
 
             progress_bar.update(1)
-            global_step += 1
+            step += 1
 
-            if global_step >= args.max_train_steps and not step_saved:
-                save_weights(global_step, epoch)
+            if step >= args.max_train_steps and not step_saved:
+                save_weights()
                 break
 
         accelerator.wait_for_everyone()
