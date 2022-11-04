@@ -482,14 +482,14 @@ class BucketManager:
             self.global_rank = global_rank
 
         # select ids for this epoch/rank
-        index = np.array(sorted(list(self.id_size_map.keys())))
-        index_len = index.shape[0]
+        index = sorted(list(self.id_size_map.keys()))
+        index_len = len(index)
         index = self.epoch_prng.permutation(index)
         index = index[:index_len - (index_len % (self.bsz * self.world_size))]
         # print("perm", self.global_rank, index[0:16])
         index = index[self.global_rank::self.world_size]
-        self.batch_total = index.shape[0] // self.bsz
-        assert (index.shape[0] % self.bsz == 0)
+        self.batch_total = len(index) // self.bsz
+        assert (len(index) % self.bsz == 0)
         index = set(index)
 
         self.epoch = {}
@@ -497,8 +497,7 @@ class BucketManager:
         self.batch_delivered = 0
         for bucket_id in sorted(self.buckets.keys()):
             if len(self.buckets[bucket_id]) > 0:
-                self.epoch[bucket_id] = np.array([post_id for post_id in self.buckets[bucket_id] if post_id in index],
-                                                 dtype=np.int64)
+                self.epoch[bucket_id] = [post_id for post_id in self.buckets[bucket_id] if post_id in index]
                 self.prng.shuffle(self.epoch[bucket_id])
                 self.epoch[bucket_id] = list(self.epoch[bucket_id])
                 overhang = len(self.epoch[bucket_id]) % self.bsz
@@ -537,7 +536,6 @@ class BucketManager:
             bucket_probs = np.array(bucket_probs, dtype=np.float32)
             bucket_lens = bucket_probs
             bucket_probs = bucket_probs / bucket_probs.sum()
-            bucket_ids = np.array(bucket_ids, dtype=np.int64)
             if bool(self.epoch):
                 chosen_id = int(self.prng.choice(bucket_ids, 1, p=bucket_probs)[0])
             else:
@@ -658,7 +656,7 @@ class DreamBoothDataset(Dataset):
 
         self.image_transforms = transforms.Compose(
             [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BOX),
+                transforms.Resize(size, interpolation=transforms.InterpolationMode.LANCZOS),
                 transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
@@ -713,10 +711,11 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
             self.class_bucket_path_map = {}
             class_id_size_map = self.get_path_size_map((str(item[0]) for item in self.class_entries), "class")
             for batch, size in BucketManager(class_id_size_map, bsz=1, seed=seed, debug=debug).generator():
-                self.class_bucket_path_map.setdefault(size, []).extend([batch])
+                self.class_bucket_path_map.setdefault(size, []).extend([batch[0]])
 
         # cache prompts for reading
-        self.prompt_cache = {path: prompt for path, prompt in self.instance_entries + self.class_entries}
+        self.prompt_cache = {str(path): prompt for path, prompt in self.instance_entries + self.class_entries}
+        print(self.prompt_cache)
 
     def __len__(self):
         return self._length // self.bsz
@@ -748,7 +747,7 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
             new_w, new_h = w, h
 
         image_transforms = transforms.Compose([
-            transforms.Resize((new_h, new_w), interpolation=transforms.InterpolationMode.BOX),
+            transforms.Resize((new_h, new_w), interpolation=transforms.InterpolationMode.LANCZOS),
             transforms.CenterCrop((h, w)) if center_crop else transforms.RandomCrop((h, w)),
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5])
@@ -777,9 +776,13 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
                 example["instance_images"] = self.transform(instance_image, size)
                 example["instance_prompt_ids"] = self.tokenize(instance_prompt)
 
+                print("BUCKET MAP")
+                print(self.class_bucket_path_map)
+
                 if self.with_prior_preservation:
                     if not (size in self.class_bucket_path_map and any(self.class_bucket_path_map[size])):
-                        logger.info(f"No class image with {size} exists. Will crop to the bucket with closest aspect ratio.")
+                        logger.info(
+                            f"No class image with {size} exists. Will crop to the bucket with closest aspect ratio.")
 
                         kv = [(abs(k[0] / k[1] - size[0] / size[1]), v)
                               for k, v in self.class_bucket_path_map.keys() if any(v)]
@@ -789,6 +792,9 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
                     else:
                         class_path = random.choice(self.class_bucket_path_map[size])
 
+                    print()
+                    print(class_path)
+                    print()
                     class_prompt = self.prompt_cache[class_path]
                     class_image = self.read_img(class_path)
                     example["class_images"] = self.transform(class_image, size)
