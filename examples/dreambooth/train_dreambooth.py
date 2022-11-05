@@ -1323,8 +1323,8 @@ def main(args):
             pipeline = pipeline.to(accelerator.device)
             g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
             pipeline.set_progress_bar_config(disable=True)
-            sample_dir = os.path.join(save_dir, "samples")
-            os.makedirs(sample_dir, exist_ok=True)
+            sample_dir = save_dir / "samples"
+            sample_dir.mkdir(exist_ok=True)
             with torch.autocast("cuda"), torch.inference_mode():
                 for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
                     images = pipeline(
@@ -1335,7 +1335,7 @@ def main(args):
                         num_images_per_prompt=args.infer_batch_size,
                         generator=g_cuda).images
                     for k, image in enumerate(images):
-                        image.save(os.path.join(sample_dir, f"{i * args.infer_batch_size + k}.png"))
+                        image.save(sample_dir / f"{i * args.infer_batch_size + k}.png")
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -1343,7 +1343,7 @@ def main(args):
 
         if args.wandb:
             if args.wandb_sample:
-                accelerator.log({"samples": [wandb.Image(x) for x in images]}, step=global_step)
+                wandb.log({"samples": [wandb.Image(x) for x in sample_dir.glob("*.png")]}, step=global_step, commit=False)
 
             if args.wandb_artifact:
                 model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
@@ -1457,15 +1457,16 @@ def main(args):
             if overrode_max_train_steps:
                 l = logs.copy()
                 del l["epoch"]
+                l["total_steps"] = step
                 sub_progress.set_postfix(**l)
             else:
                 main_progress.update()
                 main_progress.set_postfix(**logs)
 
-            accelerator.log(logs, step=global_step)
-
             if global_step > args.save_min_steps and not step % args.save_interval or step >= args.max_train_steps:
                 save_weights()
+
+            accelerator.log(logs, step=global_step)
 
             if step >= args.max_train_steps:
                 break
