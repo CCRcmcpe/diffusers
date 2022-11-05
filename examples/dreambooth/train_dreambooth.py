@@ -219,8 +219,12 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--scale_lr",
         action="store_true",
-        default=False,
         help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
+    )
+    parser.add_argument(
+        "--scale_lr_linear",
+        action="store_true",
+        help="Overrides --scale_lr to not use sqrt scale but directly multiply.",
     )
     parser.add_argument(
         "--lr_scheduler",
@@ -1084,8 +1088,11 @@ def main(args):
         if args.train_text_encoder:
             text_encoder.gradient_checkpointing_enable()
 
-    if args.scale_lr:
-        args.learning_rate = args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+    if args.scale_lr_linear:
+        args.learning_rate *= args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+    elif args.scale_lr:
+        args.learning_rate *= math.sqrt(
+            args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes)
 
     optimizer_class = get_optimizer_class(args.optimizer)
 
@@ -1343,7 +1350,8 @@ def main(args):
 
         if args.wandb:
             if args.wandb_sample:
-                wandb.log({"samples": [wandb.Image(x) for x in sample_dir.glob("*.png")]}, step=global_step, commit=False)
+                wandb.log({"samples": [wandb.Image(x) for x in sample_dir.glob("*.png")]}, step=global_step,
+                          commit=False)
 
             if args.wandb_artifact:
                 model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
@@ -1382,7 +1390,8 @@ def main(args):
 
         global_epoch = base_epoch + epoch
 
-        sub_progress = tqdm(train_dataloader, unit="batch", disable=not accelerator.is_local_main_process or not overrode_max_train_steps)
+        sub_progress = tqdm(train_dataloader, unit="batch",
+                            disable=not accelerator.is_local_main_process or not overrode_max_train_steps)
         sub_progress.set_description(f"Epoch {global_epoch + 1}")
 
         for batch in sub_progress:
