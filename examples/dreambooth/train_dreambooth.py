@@ -1348,7 +1348,7 @@ def main(args):
 
         if args.wandb:
             if args.wandb_sample:
-                wandb.log({"samples": [wandb.Image(x) for x in sample_dir.glob("*.png")]}, step=global_step,
+                wandb.log({"samples": [wandb.Image(str(x)) for x in sample_dir.glob("*.png")]}, step=global_step,
                           commit=False)
 
             if args.wandb_artifact:
