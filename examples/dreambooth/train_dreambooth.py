@@ -392,7 +392,7 @@ def parse_args(input_args=None):
     elif args.pretrained_model_name_or_path is None:
         raise ValueError("A model is needed.")
 
-    if Path(args.config).is_file():
+    if args.config is not None and Path(args.config).is_file():
         with open(args.config, 'r') as f:
             config = yaml.load(f, Loader)
         config.update(args.__dict__)
@@ -693,7 +693,7 @@ class DreamBoothDataset(Dataset):
         random.shuffle(self.instance_entries)
         self.num_instance_images = len(self.instance_entries)
         self.num_class_images = len(self.class_entries)
-        self._length = max(self.num_class_images, self.num_instance_images)
+        self._length = self.num_instance_images
 
         self.image_transforms = transforms.Compose(
             [
@@ -1440,14 +1440,14 @@ def main(args):
 
             step_saved = False
 
-            if step > 0 and not step % args.save_interval:
+            if global_step > args.save_min_steps and step > 0 and not step % args.save_interval:
                 save_weights()
                 step_saved = True
 
             progress_bar.update(1)
             step += 1
 
-            if step >= args.max_train_steps and not step_saved:
+            if global_step > args.save_min_steps and step >= args.max_train_steps and not step_saved:
                 save_weights()
                 break
 
