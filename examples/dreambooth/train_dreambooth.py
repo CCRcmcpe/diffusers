@@ -942,7 +942,7 @@ def get_optimizer_class(optimizer_name: str) -> Any:
         raise ValueError("WTF is that optimizer")
 
 
-def generate_class_images(args, accelerator):
+def generate_class_images(args, noise_scheduler, accelerator):
     pipeline = None
     for concept in args.concepts_list:
         class_images_dir = Path(concept["class_data_dir"])
@@ -960,6 +960,7 @@ def generate_class_images(args, accelerator):
                     args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
                     subfolder=None if args.pretrained_vae_name_or_path else "vae"
                 ),
+                scheduler=noise_scheduler,
                 torch_dtype=torch_dtype,
                 safety_checker=None
             )
@@ -1037,8 +1038,10 @@ def main(args):
         with open(args.concepts_list, "r") as f:
             args.concepts_list = json.load(f)
 
+    noise_scheduler = DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+
     if args.with_prior_preservation:
-        generate_class_images(args, accelerator)
+        generate_class_images(args, noise_scheduler, accelerator)
 
     # Load the tokenizer
     if args.tokenizer_name:
@@ -1127,8 +1130,6 @@ def main(args):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         base_step = checkpoint["total_steps"]
         base_epoch = checkpoint["total_epoch"]
-
-    noise_scheduler = DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     dataset_class = DreamBoothDatasetWithARB if args.use_aspect_ratio_bucket else DreamBoothDataset
     train_dataset = dataset_class(
@@ -1287,9 +1288,6 @@ def main(args):
         else:
             text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
 
-        scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False,
-                                  set_alpha_to_one=False)
-
         unet_unwrapped = accelerator.unwrap_model(unet)
 
         if args.save_unet_half:
@@ -1304,7 +1302,7 @@ def main(args):
                 subfolder=None if args.pretrained_vae_name_or_path else "vae"
             ),
             safety_checker=None,
-            scheduler=scheduler,
+            scheduler=noise_scheduler,
             torch_dtype=torch.float16
         )
 
