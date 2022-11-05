@@ -376,7 +376,7 @@ def parse_args(input_args=None):
     else:
         args = parser.parse_args()
 
-    if args.resume:
+    if args.resume and args.pretrained_model_name_or_path is None:
         ckpts = [(int(x.name), x) for x in Path(args.output_dir).iterdir() if x.is_dir() and x.name.isdigit()]
 
         if not any(ckpts):
@@ -746,7 +746,7 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
         self.bsz = bsz
 
         instance_id_size_map = self.get_path_size_map((str(item[0]) for item in self.instance_entries), "instance")
-        self.instance_bucket_manager = BucketManager(instance_id_size_map, bsz=bsz, seed=seed, debug=debug).generator()
+        self.instance_bucket_manager = BucketManager(instance_id_size_map, bsz=bsz, seed=seed, debug=debug)
 
         if self.with_prior_preservation:
             self.class_bucket_path_map = {}
@@ -812,7 +812,7 @@ class DreamBoothDatasetWithARB(torch.utils.data.IterableDataset, DreamBoothDatas
         return new_img
 
     def __iter__(self):
-        for batch, size in self.instance_bucket_manager:
+        for batch, size in self.instance_bucket_manager.generator():
             result = []
 
             for instance_path in batch:
