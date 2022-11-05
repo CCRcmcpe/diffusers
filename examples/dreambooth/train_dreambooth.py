@@ -26,6 +26,7 @@ from accelerate.utils import set_seed
 from huggingface_hub import HfFolder, whoami
 from torch.utils.data import Dataset
 from torchvision import transforms
+from tqdm import trange
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -300,6 +301,12 @@ def parse_args(input_args=None):
         help="Project name in your wandb.",
     )
     parser.add_argument(
+        "--wandb_sample",
+        default=True,
+        action="store_true",
+        help="Upload samples of saved checkpoints to wandb.",
+    )
+    parser.add_argument(
         "--wandb_artifact",
         default=False,
         action="store_true",
@@ -378,7 +385,6 @@ def parse_args(input_args=None):
 
     if args.resume and args.pretrained_model_name_or_path is None:
         ckpts = [(int(x.name), x) for x in Path(args.output_dir).iterdir() if x.is_dir() and x.name.isdigit()]
-
         if not any(ckpts):
             raise ValueError("A model is needed.")
 
@@ -1353,13 +1359,18 @@ def main(args):
 
     @atexit.register
     def on_exit():
-        if 100 < step < args.max_train_steps:
+        if args.save_min_steps < step < args.max_train_steps:
             print("Saving model...")
             save_weights()
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    progress_bar.set_description("Steps")
+    if overrode_max_train_steps:
+        main_progress = trange(args.num_train_epochs, unit="epoch", disable=not accelerator.is_local_main_process)
+        main_progress.set_description("Epochs")
+    else:
+        main_progress = trange(args.max_train_steps, unit="step", disable=not accelerator.is_local_main_process)
+        main_progress.set_description("Steps")
+
     step = 0
     loss_avg = AverageMeter()
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
@@ -1368,7 +1379,13 @@ def main(args):
         unet.train()
         if args.train_text_encoder:
             text_encoder.train()
-        for step, batch in enumerate(train_dataloader):
+
+        global_epoch = base_epoch + epoch
+
+        sub_progress = tqdm(train_dataloader, unit="batch", disable=not accelerator.is_local_main_process or not overrode_max_train_steps)
+        sub_progress.set_description(f"Epoch {global_epoch + 1}")
+
+        for batch in sub_progress:
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 with torch.no_grad():
@@ -1431,27 +1448,32 @@ def main(args):
                 optimizer.zero_grad(set_to_none=True)
                 loss_avg.update(loss.detach_(), bsz)
 
-            global_step = base_step + step
-            global_epoch = base_epoch + epoch
-
-            logs = {"epoch": global_epoch + 1, "loss": loss_avg.avg.item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
-
-            step_saved = False
-
-            if global_step > args.save_min_steps and step > 0 and not step % args.save_interval:
-                save_weights()
-                step_saved = True
-
-            progress_bar.update(1)
             step += 1
 
-            if global_step > args.save_min_steps and step >= args.max_train_steps and not step_saved:
+            global_step = base_step + step
+
+            logs = {"epoch": global_epoch + 1, "loss": loss_avg.avg.item(), "lr": lr_scheduler.get_last_lr()[0]}
+
+            if overrode_max_train_steps:
+                l = logs.copy()
+                del l["epoch"]
+                sub_progress.set_postfix(**l)
+            else:
+                main_progress.update()
+                main_progress.set_postfix(**logs)
+
+            accelerator.log(logs, step=global_step)
+
+            if global_step > args.save_min_steps and not step % args.save_interval or step >= args.max_train_steps:
                 save_weights()
+
+            if step >= args.max_train_steps:
                 break
 
         accelerator.wait_for_everyone()
+
+        if overrode_max_train_steps:
+            main_progress.update()
 
     accelerator.end_training()
 
