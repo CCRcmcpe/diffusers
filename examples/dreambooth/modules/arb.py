@@ -9,7 +9,7 @@ from accelerate.logging import get_logger
 from torchvision import transforms
 from tqdm.auto import tqdm
 
-from datasets import DreamBoothDataset
+from .datasets import DreamBoothDataset
 
 logger = get_logger(__name__)
 

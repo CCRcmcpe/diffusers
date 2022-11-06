@@ -182,6 +182,16 @@ def main(args):
         logging_dir=run_output_dir / "logs",
     )
 
+    if args.instance_prompt and args.with_prior_preservation:
+        if not args.read_prompt_from_txt:
+            logger.info("Running: DreamBooth (original paper method)")
+        else:
+            logger.info("Running: DreamBooth (alternative method)")
+    elif args.read_prompt_from_txt in ["instance", "both"]:
+        logger.info("Running: Equivalent to standard finetuning")
+    else:
+        logger.info("Running: [?]")
+
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
     # TODO (patil-suraj): Remove this check when gradient accumulation with two models is enabled in accelerate.
