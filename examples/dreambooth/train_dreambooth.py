@@ -311,9 +311,13 @@ def main(args):
         base_step = checkpoint["total_steps"]
         base_epoch = checkpoint["total_epoch"]
 
-    dataset_class = __import__(
-        "modules.arb.DreamBoothDatasetWithARB") if args.use_aspect_ratio_bucket else DreamBoothDataset
-    train_dataset = dataset_class(
+    def get_dataset_class():
+        if args.use_aspect_ratio_bucket:
+            from modules.arb import DreamBoothDatasetWithARB
+            return DreamBoothDatasetWithARB
+        return DreamBoothDataset
+
+    train_dataset = get_dataset_class()(
         concepts_list=args.concepts_list,
         tokenizer=tokenizer,
         with_prior_preservation=args.with_prior_preservation,

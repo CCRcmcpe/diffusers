@@ -34,13 +34,13 @@ parser.add_argument(
 parser.add_argument(
     "--instance_prompt",
     type=str,
-    default=None,
+    default="",
     help="The prompt with identifier specifying the instance",
 )
 parser.add_argument(
     "--class_prompt",
     type=str,
-    default=None,
+    default="",
     help="The prompt to specify images in the same class as provided instance images.",
 )
 parser.add_argument(
