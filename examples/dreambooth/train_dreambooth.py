@@ -15,17 +15,16 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import torch.utils.data
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from torch.utils.data import Dataset
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
-from modules.arb import DreamBoothDatasetWithARB
 from modules.args import parser
 from modules.datasets import DreamBoothDataset, PromptDataset, LatentsDataset
 
@@ -37,10 +36,6 @@ except ImportError:
 torch.backends.cudnn.benchmark = True
 
 logger = get_logger(__name__)
-
-import pydevd_pycharm
-
-pydevd_pycharm.settrace('10.0.0.1', port=1145, stdoutToServer=True, stderrToServer=True)
 
 
 def parse_args(input_argv=None):
@@ -303,7 +298,8 @@ def main(args):
         base_step = checkpoint["total_steps"]
         base_epoch = checkpoint["total_epoch"]
 
-    dataset_class = DreamBoothDatasetWithARB if args.use_aspect_ratio_bucket else DreamBoothDataset
+    dataset_class = __import__(
+        "modules.arb.DreamBoothDatasetWithARB") if args.use_aspect_ratio_bucket else DreamBoothDataset
     train_dataset = dataset_class(
         concepts_list=args.concepts_list,
         tokenizer=tokenizer,
