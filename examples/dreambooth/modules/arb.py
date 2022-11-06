@@ -5,11 +5,13 @@ import numpy as np
 import torch
 import torch.utils
 from PIL import Image
+from accelerate.logging import get_logger
 from torchvision import transforms
 from tqdm.auto import tqdm
 
-from examples.dreambooth.modules.datasets import DreamBoothDataset
-from examples.dreambooth.train_dreambooth import logger
+from datasets import DreamBoothDataset
+
+logger = get_logger(__name__)
 
 
 class BucketManager:
