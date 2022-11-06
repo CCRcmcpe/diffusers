@@ -136,10 +136,12 @@ def generate_class_images(args, noise_scheduler, accelerator):
 
         sample_dataloader = accelerator.prepare(sample_dataloader)
 
-        with torch.autocast("cuda"), torch.inference_mode():
-            for example in tqdm(
-                    sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-            ):
+        with torch.autocast("cuda"), \
+                torch.inference_mode(), \
+                tqdm(total=num_new_images,
+                     desc="Generating class images",
+                     disable=not accelerator.is_local_main_process) as progress:
+            for example in sample_dataloader:
                 images = pipeline(prompt=example["prompt"][0][0],
                                   negative_prompt=example["prompt"][1][0],
                                   guidance_scale=args.guidance_scale,
@@ -150,6 +152,7 @@ def generate_class_images(args, noise_scheduler, accelerator):
                     hash_image = hashlib.sha1(image.tobytes()).hexdigest()
                     image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
                     image.save(image_filename)
+                    progress.update()
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
