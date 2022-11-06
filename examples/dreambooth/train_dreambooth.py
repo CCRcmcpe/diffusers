@@ -3,6 +3,7 @@ import copy
 import hashlib
 import itertools
 import json
+import logging
 import math
 import os
 import random
@@ -35,7 +36,8 @@ except ImportError:
 
 torch.backends.cudnn.benchmark = True
 
-logger = get_logger(__name__)
+logging.basicConfig()
+logger = get_logger("DB")
 
 
 def parse_args(input_argv=None):

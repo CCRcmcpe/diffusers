@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from .datasets import DreamBoothDataset
 
-logger = get_logger(__name__)
+logger = get_logger("ARB")
 
 
 class BucketManager:
