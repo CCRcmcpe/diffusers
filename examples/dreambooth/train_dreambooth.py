@@ -1270,10 +1270,10 @@ def main(args):
 
     # Only show the progress bar once on each machine.
     if overrode_max_train_steps:
-        main_progress = trange(args.num_train_epochs, unit="epoch", disable=not accelerator.is_local_main_process)
+        main_progress = tqdm(total=args.num_train_epochs, unit="epoch", disable=not accelerator.is_local_main_process)
         main_progress.set_description("Epochs")
     else:
-        main_progress = trange(args.max_train_steps, unit="step", disable=not accelerator.is_local_main_process)
+        main_progress = tqdm(total=args.max_train_steps, unit="step", disable=not accelerator.is_local_main_process)
         main_progress.set_description("Steps")
 
     step = global_step = global_epoch = 0
@@ -1361,10 +1361,11 @@ def main(args):
             sample_dir = run_output_dir / "samples"
             sample_dir.mkdir(exist_ok=True)
             samples = []
-            with torch.autocast("cuda"), torch.inference_mode():
-                for _ in trange(math.ceil(args.n_save_sample / args.infer_batch_size),
-                                total=args.n_save_sample + (args.n_save_sample % args.infer_batch_size),
-                                desc="Generating samples"):
+            with torch.autocast("cuda"), \
+                    torch.inference_mode(), \
+                    tqdm(total=args.n_save_sample + (args.n_save_sample % args.infer_batch_size),
+                         desc="Generating samples") as progress:
+                for _ in range(math.ceil(args.n_save_sample / args.infer_batch_size)):
                     samples.extend(pipeline(
                         prompt=args.save_sample_prompt,
                         negative_prompt=args.save_sample_negative_prompt,
@@ -1372,6 +1373,7 @@ def main(args):
                         num_inference_steps=args.infer_steps,
                         num_images_per_prompt=args.infer_batch_size,
                         generator=g_cuda).images)
+                    progress.update(args.infer_batch_size)
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
