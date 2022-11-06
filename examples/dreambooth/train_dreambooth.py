@@ -1286,8 +1286,8 @@ def main(args):
                             global_epoch > 0 and global_epoch % args.save_interval_epochs == 0)) or from_interrupt
 
         save_sample = (args.save_sample_prompt is not None and
-                       (
-                               save_checkpoint or args.sample_interval is not None and global_step % args.sample_interval == 0))
+                       (save_checkpoint or args.sample_interval is not None and
+                        global_step % args.sample_interval == 0))
 
         if not (accelerator.is_main_process and save_sample):
             return
