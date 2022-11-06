@@ -27,7 +27,6 @@ from accelerate.utils import set_seed
 from huggingface_hub import HfFolder, whoami
 from torch.utils.data import Dataset
 from torchvision import transforms
-from tqdm import trange
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -683,13 +682,13 @@ class DreamBoothDataset(Dataset):
         for concept in concepts_list:
             inst_img_path = [prompt_resolver(x, concept["instance_prompt"], "instance") for x in
                              Path(concept["instance_data_dir"]).iterdir() if
-                             x.is_file()]
+                             x.is_file() and x.suffix != '.txt']
             self.instance_entries.extend(inst_img_path)
 
             if with_prior_preservation:
                 class_img_path = [prompt_resolver(x, concept["class_prompt"], "class") for x in
                                   Path(concept["class_data_dir"]).iterdir() if
-                                  x.is_file()]
+                                  x.is_file() and x.suffix != '.txt']
                 self.class_entries.extend(class_img_path[:num_class_images])
 
         random.shuffle(self.instance_entries)
