@@ -397,8 +397,8 @@ def parse_args(input_args=None):
     if args.config is not None and Path(args.config).is_file():
         with open(args.config, 'r') as f:
             config = yaml.load(f, Loader)
-        config.update(args.__dict__)
-        args.__dict__ = config
+        parser.set_defaults(**config)
+        args = parser.parse_args()
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -1278,12 +1278,15 @@ def main(args):
 
     step = global_step = global_epoch = 0
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
+    epoch_saved = False
 
     def on_step_end(from_interrupt=False):
+        nonlocal epoch_saved
+
         save_checkpoint = (step > args.save_min_steps and
                            step >= args.max_train_steps or
                            (args.save_interval is not None and global_step % args.save_interval == 0 or
-                            global_epoch > 0 and global_epoch % args.save_interval_epochs == 0)) or from_interrupt
+                            global_epoch > 0 and global_epoch % args.save_interval_epochs == 0 and not epoch_saved)) or from_interrupt
 
         save_sample = (args.save_sample_prompt is not None and
                        (save_checkpoint or args.sample_interval is not None and
@@ -1334,6 +1337,8 @@ def main(args):
                 'global_epoch': global_epoch,
             }, state_dir / "state.pt")
 
+            epoch_saved = True
+
             logger.info(f"[*] Checkpoint saved at {save_dir}")
 
             if args.wandb and args.wandb_artifact:
@@ -1378,6 +1383,8 @@ def main(args):
                 wandb.log({"samples": [wandb.Image(x) for x in samples]}, step=global_step, commit=False)
 
     for epoch in range(args.num_train_epochs):
+        epoch_saved = False
+
         unet.train()
         if args.train_text_encoder:
             text_encoder.train()
