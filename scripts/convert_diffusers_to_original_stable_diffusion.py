@@ -194,8 +194,8 @@ def convert_text_enc_state_dict(text_enc_dict):
 
 if __name__ == "__main__":
     DTYPE_MAP = {
-        "int8": torch.int8,
-        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
         "fp32": torch.float32
     }
     DTYPES = list(DTYPE_MAP.keys())
