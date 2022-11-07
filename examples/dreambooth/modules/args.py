@@ -92,7 +92,7 @@ parser.add_argument(
 
 parser.add_argument(
     "--pad_tokens",
-    default=False,
+    default=True,
     action="store_true",
     help="Flag to pad tokens to length 77."
 )
