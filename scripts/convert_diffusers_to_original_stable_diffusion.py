@@ -193,15 +193,38 @@ def convert_text_enc_state_dict(text_enc_dict):
 
 
 if __name__ == "__main__":
+    DTYPE_MAP = {
+        "int8": torch.int8,
+        "float16": torch.float16,
+        "fp32": torch.float32
+    }
+    DTYPES = list(DTYPE_MAP.keys())
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--model_path", default=None, type=str, required=True, help="Path to diffusers model.")
     parser.add_argument("--checkpoint_path", default=None, type=str, required=True, help="Path to the output SD model.")
-    parser.add_argument("--unet_half", action="store_true", help="Save unet weights in half precision.")
+
+    parser.add_argument("--unet_half", action="store_true",
+                        help="Save unet weights in half precision. (Use --unet_dtype).")
+    parser.add_argument("--unet_dtype",
+                        type=str,
+                        choices=DTYPES,
+                        default="fp16",
+                        help="Save unet weights in this precision.")
     parser.add_argument("--text_encoder", action="store_true", help="Use this if you used train_text_encoder.")
-    parser.add_argument("--text_encoder_half", action="store_true", help="Save text encoder weights in half precision.")
+    parser.add_argument("--text_encoder_dtype",
+                        type=str,
+                        choices=DTYPES,
+                        default="fp16",
+                        help="Save text encoder weights in this precision.")
     parser.add_argument("--vae", action="store_true", help="Use this if you want VAE embedded in model.")
-    parser.add_argument("--vae_half", action="store_true", help="Save VAE weights in half precision. (NOT RECOMMENDED)")
+    parser.add_argument("--vae_dtype",
+                        type=str,
+                        choices=DTYPES,
+                        default="fp32",
+                        help="Save VAE weights in this precision. (other than fp32 NOT RECOMMENDED)")
+
     parser.add_argument("--overwrite", action="store_true", help="Overwrite destination.")
 
     args = parser.parse_args()
@@ -210,6 +233,9 @@ if __name__ == "__main__":
 
     assert args.checkpoint_path is not None, "Must provide a checkpoint path!"
 
+    if args.unet_half:
+        args.unet_dtype = "fp16"
+
     unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.bin")
     vae_path = osp.join(args.model_path, "vae", "diffusion_pytorch_model.bin")
     text_enc_path = osp.join(args.model_path, "text_encoder", "pytorch_model.bin")
@@ -217,27 +243,24 @@ if __name__ == "__main__":
     # Convert the UNet model
     unet_state_dict = torch.load(unet_path, map_location="cpu")
     unet_state_dict = convert_unet_state_dict(unet_state_dict)
-    unet_state_dict = {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
-    if args.unet_half:
-        unet_state_dict = {k: v.half() for k, v in unet_state_dict.items()}
+    unet_state_dict = {"model.diffusion_model." + k: v.to(DTYPE_MAP[args.unet_dtype])
+                       for k, v in unet_state_dict.items()}
 
     vae_state_dict = {}
     if args.vae:
         # Convert the VAE model
         vae_state_dict = torch.load(vae_path, map_location="cpu")
         vae_state_dict = convert_vae_state_dict(vae_state_dict)
-        vae_state_dict = {"first_stage_model." + k: v for k, v in vae_state_dict.items()}
-        if args.vae_half:
-            vae_state_dict = {k: v.half() for k, v in vae_state_dict.items()}
+        vae_state_dict = {"first_stage_model." + k: v.to(DTYPE_MAP[args.unet_dtype])
+                          for k, v in vae_state_dict.items()}
 
     text_enc_dict = {}
     if args.text_encoder:
         # Convert the text encoder model
         text_enc_dict = torch.load(text_enc_path, map_location="cpu")
         text_enc_dict = convert_text_enc_state_dict(text_enc_dict)
-        text_enc_dict = {"cond_stage_model.transformer." + k: v for k, v in text_enc_dict.items()}
-        if args.text_encoder_half:
-            text_enc_dict = {k: v.half() for k, v in text_enc_dict.items()}
+        text_enc_dict = {"cond_stage_model.transformer." + k: v.to(DTYPE_MAP[args.unet_dtype])
+                         for k, v in text_enc_dict.items()}
 
     # Put together new checkpoint
     state_dict = {**unet_state_dict, **vae_state_dict, **text_enc_dict}
