@@ -487,11 +487,11 @@ def main(args):
         nonlocal epoch_saved
 
         save_checkpoint = (from_interrupt or
-                           step > args["save_min_steps"] and
-                           step >= args["max_train_steps"] or
-                           args["save_interval"] is not None and global_step % args["save_interval"] == 0 or
-                           global_epoch > 0 and not epoch_saved and args["save_interval"] is None and
-                           global_epoch % args["save_interval_epochs"] == 0)
+                           step > args.save_min_steps and
+                           step >= args.max_train_steps or
+                           args.save_interval is not None and global_step % args.save_interval == 0 or
+                           global_epoch > 0 and not epoch_saved and args.save_interval is None and
+                           global_epoch % args.save_interval_epochs == 0)
 
         save_sample = (args.save_sample_prompt is not None and
                        save_checkpoint or
