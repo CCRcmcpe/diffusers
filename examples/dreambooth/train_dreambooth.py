@@ -486,14 +486,17 @@ def main(args):
     def on_step_end(from_interrupt=False):
         nonlocal epoch_saved
 
-        save_checkpoint = (step > args.save_min_steps and
-                           step >= args.max_train_steps or
-                           (args.save_interval is not None and global_step % args.save_interval == 0 or
-                            global_epoch > 0 and global_epoch % args.save_interval_epochs == 0 and not epoch_saved)) or from_interrupt
+        save_checkpoint = (from_interrupt or
+                           step > args["save_min_steps"] and
+                           step >= args["max_train_steps"] or
+                           args["save_interval"] is not None and global_step % args["save_interval"] == 0 or
+                           global_epoch > 0 and not epoch_saved and args["save_interval"] is None and
+                           global_epoch % args["save_interval_epochs"] == 0)
 
         save_sample = (args.save_sample_prompt is not None and
-                       (save_checkpoint or args.sample_interval is not None and
-                        global_step % args.sample_interval == 0))
+                       save_checkpoint or
+                       args.sample_interval is not None and
+                       global_step % args.sample_interval == 0)
 
         if not (accelerator.is_main_process and save_sample):
             return
