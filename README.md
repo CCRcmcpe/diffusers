@@ -1,7 +1,8 @@
 For upstream info, refer to: https://github.com/ShivamShrirao/diffusers/blob/main/README.md
 
-Mainly improved the dreambooth training script (see examples/dreambooth). But now it's pretty much a Stable Diffusion finetuner with dreambooth functionality.  
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1gboJw5D3Qol_Fcm-XFd7CvUo99yM8U9y)
+Mainly improved the dreambooth training script (see examples/dreambooth). But now it's pretty much a Stable Diffusion finetuner with dreambooth functionality.
+
+Example with detailed instructions of how to use: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1gboJw5D3Qol_Fcm-XFd7CvUo99yM8U9y)
 
 ### Features
 
