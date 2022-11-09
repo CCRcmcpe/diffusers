@@ -632,9 +632,10 @@ def main(args, config):
                     accelerator.clip_grad_norm_(params_to_clip, config.gradient_clipping.max_grad_norm)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                lr_scheduler.step(epoch + i / len(train_dataloader))
 
             local_steps += 1
+            lr_scheduler.step(epoch + i / len(train_dataloader))
+
             global_steps = base_step + local_steps
 
             logs = {"epoch": global_epochs + 1, "loss": loss.detach_().item(), "lr": lr_scheduler.get_lr()[0]}
