@@ -1,5 +1,4 @@
 import random
-import re
 from pathlib import Path
 
 from PIL import Image
@@ -15,16 +14,12 @@ class DreamBoothDataset(Dataset):
 
     def __init__(
             self,
-            concepts_list,
+            concepts,
             tokenizer,
             with_prior_preservation=True,
             size=512,
             center_crop=False,
-            num_class_images=None,
             pad_tokens=False,
-            read_prompt_from_txt=None,
-            instance_insert_pos_regex=None,
-            class_insert_pos_regex=None,
             **kwargs
     ):
         self.size = size
@@ -36,44 +31,29 @@ class DreamBoothDataset(Dataset):
         self.instance_entries = []
         self.class_entries = []
 
-        def combine_prompt(default_prompt, txt_prompt, prompt_type):
-            match = None
+        def combine_prompt(prompt: str, txt_prompt: str, template: str):
+            return template.replace("{PROMPT}", prompt).replace("{TXT_PROMPT}", txt_prompt)
 
-            if prompt_type == "instance" and instance_insert_pos_regex is not None:
-                match = re.search(instance_insert_pos_regex, txt_prompt)
-            elif prompt_type == "class" and class_insert_pos_regex is not None:
-                match = re.search(class_insert_pos_regex, txt_prompt)
+        def resolve_dataset(dataset):
+            for x in Path(dataset.path).iterdir():
+                if not (x.is_file() and x.suffix != ".txt"):
+                    continue
 
-            if match is None:
-                return default_prompt + " " + txt_prompt
+                if dataset.combine_prompt_from_txt:
+                    content = x.with_suffix('.txt').read_text()
+                    prompt = combine_prompt(dataset.prompt, content, dataset.prompt_combine_template)
+                else:
+                    prompt = dataset.prompt
 
-            idx = match.span()[0]
-            return txt_prompt[:idx] + default_prompt + (" " + txt_prompt[idx:]) if len(txt_prompt[idx:]) > 0 else ""
+                yield str(x), prompt
 
-        def prompt_resolver(x, default, prompt_type):
-            entry = (x, default)
-
-            if read_prompt_from_txt is None or read_prompt_from_txt != prompt_type and read_prompt_from_txt != "both":
-                return entry
-
-            content = Path(x).with_suffix('.txt').read_text()
-            combined_prompt = combine_prompt(default, content, prompt_type)
-
-            entry = (x, combined_prompt)
-
-            return entry
-
-        for concept in concepts_list:
-            inst_img_path = [prompt_resolver(x, concept["instance_prompt"], "instance") for x in
-                             Path(concept["instance_data_dir"]).iterdir() if
-                             x.is_file() and x.suffix != '.txt']
-            self.instance_entries.extend(inst_img_path)
+        for concept in concepts:
+            instance_entries = resolve_dataset(concept.instance_set)
+            self.instance_entries.extend(instance_entries)
 
             if with_prior_preservation:
-                class_img_path = [prompt_resolver(x, concept["class_prompt"], "class") for x in
-                                  Path(concept["class_data_dir"]).iterdir() if
-                                  x.is_file() and x.suffix != '.txt']
-                self.class_entries.extend(class_img_path[:num_class_images])
+                class_entries = resolve_dataset(concept.class_set)
+                self.class_entries.extend(class_entries)
 
         random.shuffle(self.instance_entries)
         self.num_instance_images = len(self.instance_entries)

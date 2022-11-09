@@ -2,7 +2,6 @@ import atexit
 import copy
 import hashlib
 import itertools
-import json
 import logging
 import math
 import os
@@ -17,31 +16,27 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import torch.utils.data
-import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
-from diffusers.optimization import get_scheduler
 from modules.args import parser
 from modules.datasets import DreamBoothDataset, PromptDataset, LatentsDataset
 
-try:
-    from yaml import CLoader as Loader, CDumper as Dumper
-except ImportError:
-    from yaml import Loader, Dumper
-
 torch.backends.cudnn.benchmark = True
 
-logging.basicConfig()
+logging.basicConfig(level="INFO")
 logger = get_logger("DB")
 
 
-def parse_args(input_argv=None):
-    args = parser.parse_args(input_argv)
+
+def get_params():
+    args = parser.parse_args()
+    config = None
 
     if args.resume:
         state_dir = Path(args.pretrained_model_name_or_path, "state")
@@ -50,70 +45,42 @@ def parse_args(input_argv=None):
             args.resume = False
 
         logger.info("Trying to resume training, loading config from checkpoint")
-        config = state_dir / "args.yaml"
-        if config.is_file():
+        config_yaml = state_dir / "config.yaml"
+        if config_yaml.is_file():
             if args.config is not None:
                 logger.warning("Overriding checkpoint's config")
             else:
-                args.config = str(config)
+                config = OmegaConf.load(config_yaml)
 
-    if args.config is not None and Path(args.config).is_file():
-        with open(args.config, 'r') as f:
-            config = yaml.load(f, Loader)
-        parser.set_defaults(**config)
-        args = parser.parse_args()
+    if config is None:
+        config = OmegaConf.load(args.config)
+
+    # config = DotMap(config)
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
 
-    return args
+    return args, config
 
 
-def get_optimizer_class(optimizer_name: str) -> Any:
-    def try_import_bnb():
-        try:
-            import bitsandbytes as bnb
-            return bnb
-        except ImportError:
-            raise ImportError(
-                "To use 8-bit optimizers, please install the bitsandbytes library: `pip install bitsandbytes`."
-            )
-
-    def try_import_ds():
-        try:
-            import deepspeed
-            return deepspeed
-        except ImportError:
-            raise ImportError(
-                "Failed to import Deepspeed"
-            )
-
-    name = optimizer_name.lower()
-
-    if name == "adamw":
-        return torch.optim.AdamW
-    elif name == "adamw_8bit":
-        return try_import_bnb().optim.AdamW8bit
-    elif name == "adamw_ds":
-        return try_import_ds().ops.adam.DeepSpeedCPUAdam
-    elif name == "sgdm":
-        return torch.optim.sgd
-    elif name == "sgdm_8bit":
-        return try_import_bnb().optim.SGD8bit
-    else:
-        raise ValueError("WTF is that optimizer")
-
-
-def generate_class_images(args, noise_scheduler, accelerator):
+def generate_class_images(concepts, args, noise_scheduler, accelerator):
     pipeline = None
-    for concept in args.concepts_list:
-        class_images_dir = Path(concept["class_data_dir"])
-        class_images_dir.mkdir(parents=True, exist_ok=True)
-        cur_class_images = len(list(class_images_dir.iterdir()))
+    for concept in concepts:
+        autogen_config = concept.class_set.auto_generate
 
-        if cur_class_images >= args.num_class_images:
+        if not autogen_config.enabled:
+            continue
+
+        class_images_dir = Path(concept.class_set.path)
+        class_images_dir.mkdir(parents=True, exist_ok=True)
+
+        cur_class_images = len(list(class_images_dir.iterdir()))
+        if cur_class_images >= autogen_config.num_target:
             break
+
+        num_new_images = autogen_config.num_target - cur_class_images
+        logger.info(f"Number of class images to sample: {num_new_images}.")
 
         torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
         if pipeline is None:
@@ -130,11 +97,8 @@ def generate_class_images(args, noise_scheduler, accelerator):
             pipeline.set_progress_bar_config(disable=True)
             pipeline.to(accelerator.device)
 
-        num_new_images = args.num_class_images - cur_class_images
-        logger.info(f"Number of class images to sample: {num_new_images}.")
-
-        sample_dataset = PromptDataset([concept["class_prompt"], concept["class_negative_prompt"]], num_new_images)
-        sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=args.infer_batch_size)
+        sample_dataset = PromptDataset([concept.class_set.prompt, autogen_config.negative_prompt], num_new_images)
+        sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=autogen_config.batch_size)
 
         sample_dataloader = accelerator.prepare(sample_dataloader)
 
@@ -146,8 +110,8 @@ def generate_class_images(args, noise_scheduler, accelerator):
             for example in sample_dataloader:
                 images = pipeline(prompt=example["prompt"][0][0],
                                   negative_prompt=example["prompt"][1][0],
-                                  guidance_scale=args.guidance_scale,
-                                  num_inference_steps=args.infer_steps,
+                                  guidance_scale=autogen_config.cfg_scale,
+                                  num_inference_steps=autogen_config.steps,
                                   num_images_per_prompt=len(example["prompt"][0])).images
 
                 for i, image in enumerate(images):
@@ -160,36 +124,85 @@ def generate_class_images(args, noise_scheduler, accelerator):
         torch.cuda.empty_cache()
 
 
-def main(args):
+def generate_run_id():
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=7))
+
+
+def get_class(name: str):
+    import importlib
+    module_name, class_name = name.rsplit(".", 1)
+    module = importlib.import_module(module_name, package=None)
+    return getattr(module, class_name)
+
+
+def get_optimizer(paramters_to_optimize, config, accelerator):
+    params = dict(config.optimizer.params)
+
+    lr_scale_config = config.optimizer.lr_scale
+    if lr_scale_config.enabled:
+        if lr_scale_config.method == "linear":
+            params["lr"] *= config.gradient_accumulation_steps * config.batch_size * accelerator.num_processes
+        elif lr_scale_config.method == "sqrt":
+            params["lr"] *= math.sqrt(
+                config.gradient_accumulation_steps * config.batch_size * accelerator.num_processes)
+        else:
+            raise ValueError()
+
+    optimizer_class = get_class(config.optimizer.name)
+
+    if "beta1" in params and "beta2" in params:
+        params["betas"] = (params["beta1"], params["beta2"])
+        del params["beta1"]
+        del params["beta2"]
+
+    optimizer = optimizer_class(paramters_to_optimize, **params)
+
+    return optimizer
+
+
+def get_lr_scheduler(config, optimizer) -> Any:
+    lr_sched_config = config.optimizer.lr_scheduler
+    scheduler = get_class(lr_sched_config.name)(optimizer, **lr_sched_config.params)
+
+    if lr_sched_config.warmup.enabled:
+        from modules.warmup_lr import WarmupLR
+        scheduler = WarmupLR(scheduler,
+                             init_lr=lr_sched_config.warmup.init_lr,
+                             num_warmup=lr_sched_config.warmup.steps,
+                             warmup_strategy=lr_sched_config.warmup.strategy)
+
+    return scheduler
+
+
+def main(args, config):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
 
-    run_id = args.run_id if args.run_id is not None else "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=7))
+    run_id = generate_run_id() if args.run_id is None else args.run_id
+
     run_output_dir = output_dir / run_id
     run_output_dir.mkdir()
 
-    loggers = ["tensorboard"]
-
-    if args.wandb:
-        import wandb
-        run = wandb.init(project=args.wandb_project)
-        wandb.config = vars(args)
-        loggers.append("wandb")
-
     accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=loggers,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        mixed_precision=config.mixed_precision,
+        log_with=list(config.monitoring.monitors),
         logging_dir=run_output_dir / "logs",
     )
 
-    if args.instance_prompt and args.with_prior_preservation:
-        if not args.read_prompt_from_txt:
+    logger.info(f"ID of current run: {run_id}")
+
+    concepts = config.data.concepts
+    not_used_read_txt = all(map(
+        lambda c: not (c.instance_set.combine_prompt_from_txt or
+                       c.class_set.combine_prompt_from_txt), concepts))
+
+    if config.prior_preservation.enabled:
+        if not_used_read_txt:
             logger.info("Running: DreamBooth (original paper method)")
         else:
             logger.info("Running: DreamBooth (alternative method)")
-    elif args.read_prompt_from_txt in ["instance", "both"]:
+    elif not_used_read_txt:
         logger.info("Running: Equivalent to standard finetuning")
     else:
         logger.info("Running: [?]")
@@ -197,33 +210,19 @@ def main(args):
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
     # TODO (patil-suraj): Remove this check when gradient accumulation with two models is enabled in accelerate.
-    if args.train_text_encoder and args.gradient_accumulation_steps > 1 and accelerator.num_processes > 1:
+    if config.train_text_encoder and config.gradient_accumulation_steps > 1 and accelerator.num_processes > 1:
         raise ValueError(
             "Gradient accumulation is not supported when training the text encoder in distributed training. "
             "Please set gradient_accumulation_steps to 1. This feature will be supported in the future."
         )
 
-    if args.seed is not None:
-        set_seed(args.seed)
-
-    if args.concepts_list is None:
-        args.concepts_list = [
-            {
-                "instance_prompt": args.instance_prompt,
-                "class_prompt": args.class_prompt,
-                "class_negative_prompt": args.class_negative_prompt,
-                "instance_data_dir": args.instance_data_dir,
-                "class_data_dir": args.class_data_dir
-            }
-        ]
-    else:
-        with open(args.concepts_list, "r") as f:
-            args.concepts_list = json.load(f)
+    if config.seed:
+        set_seed(config.seed)
 
     noise_scheduler = DDIMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
 
-    if args.with_prior_preservation:
-        generate_class_images(args, noise_scheduler, accelerator)
+    if config.prior_preservation.enabled:
+        generate_class_images(concepts, args, noise_scheduler, accelerator)
 
     # Load the tokenizer
     if args.tokenizer_name:
@@ -245,9 +244,9 @@ def main(args):
     )
 
     def encode_tokens(tokens):
-        if args.clip_skip > 1:
+        if config.clip_skip > 1:
             result = text_encoder(tokens, output_hidden_states=True, return_dict=True)
-            result = result.hidden_states[-args.clip_skip]
+            result = result.hidden_states[-config.clip_skip]
             result = text_encoder.text_model.final_layer_norm(result)
         else:
             result = text_encoder(tokens)[0]
@@ -265,44 +264,20 @@ def main(args):
     )
 
     vae.requires_grad_(False)
-    if not args.train_text_encoder:
+    if not config.train_text_encoder:
         text_encoder.requires_grad_(False)
 
-    if args.gradient_checkpointing:
+    if config.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
-        if args.train_text_encoder:
+        if config.train_text_encoder:
             text_encoder.gradient_checkpointing_enable()
 
-    if args.scale_lr_linear:
-        args.learning_rate *= args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
-    elif args.scale_lr:
-        args.learning_rate *= math.sqrt(
-            args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes)
-
-    optimizer_class = get_optimizer_class(args.optimizer)
-
     params_to_optimize = (
-        itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder else unet.parameters()
+        itertools.chain(unet.parameters(),
+                        text_encoder.parameters()) if config.train_text_encoder else unet.parameters()
     )
-
-    if "adam" in args.optimizer.lower():
-        optimizer = optimizer_class(
-            params_to_optimize,
-            lr=args.learning_rate,
-            betas=(args.adam_beta1, args.adam_beta2),
-            weight_decay=args.weight_decay,
-            eps=args.adam_epsilon,
-        )
-    elif "sgd" in args.optimizer.lower():
-        optimizer = optimizer_class(
-            params_to_optimize,
-            lr=args.learning_rate,
-            momentum=args.sgd_momentum,
-            dampening=args.sgd_dampening,
-            weight_decay=args.weight_decay
-        )
-    else:
-        raise ValueError(args.optimizer)
+    optimizer = get_optimizer(params_to_optimize, config, accelerator)
+    lr_scheduler = get_lr_scheduler(config, optimizer)
 
     base_step = 0
     base_epoch = 0
@@ -310,29 +285,26 @@ def main(args):
     if args.resume:
         checkpoint = torch.load(os.path.join(args.pretrained_model_name_or_path, "state", "state.pt"))
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
         base_step = checkpoint["total_steps"]
         base_epoch = checkpoint["total_epoch"]
 
     def get_dataset_class():
-        if args.use_aspect_ratio_bucket:
+        if config.aspect_ratio_bucket.enabled:
             from modules.arb import DreamBoothDatasetWithARB
             return DreamBoothDatasetWithARB
         return DreamBoothDataset
 
     train_dataset = get_dataset_class()(
-        concepts_list=args.concepts_list,
+        concepts=concepts,
         tokenizer=tokenizer,
-        with_prior_preservation=args.with_prior_preservation,
-        size=args.resolution,
-        center_crop=args.center_crop,
-        num_class_images=args.num_class_images,
-        pad_tokens=args.pad_tokens,
-        read_prompt_from_txt=args.read_prompt_from_txt,
-        instance_insert_pos_regex=args.instance_insert_pos_regex,
-        class_insert_pos_regex=args.class_insert_pos_regex,
-        bsz=args.train_batch_size,
-        debug=args.debug_arb,
-        seed=args.seed,
+        with_prior_preservation=config.prior_preservation.enabled,
+        size=config.data.resolution,
+        center_crop=config.data.center_crop,
+        pad_tokens=config.pad_tokens,
+        bsz=config.batch_size,
+        debug=config.aspect_ratio_bucket.debug,
+        seed=config.seed,
     )
 
     def collate_fn(examples):
@@ -341,7 +313,7 @@ def main(args):
 
         # Concat class and instance examples for prior preservation.
         # We do this to avoid doing two forward passes.
-        if args.with_prior_preservation:
+        if config.prior_preservation.enabled:
             input_ids += [example["class_prompt_ids"] for example in examples]
             pixel_values += [example["class_images"] for example in examples]
 
@@ -356,8 +328,9 @@ def main(args):
         }
         return batch
 
-    if args.use_aspect_ratio_bucket:
-        args.not_cache_latents = True
+    cache_latents = config.cache_latents
+    if config.aspect_ratio_bucket.enabled:
+        cache_latents = False
         logger.warning("Latents cache disabled.")
 
         def collate_fn_wrap(examples):
@@ -371,32 +344,32 @@ def main(args):
         )
     else:
         train_dataloader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True
+            train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True
         )
 
     weight_dtype = torch.float32
-    if args.mixed_precision == "fp16":
+    if config.mixed_precision == "fp16":
         weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
+    elif config.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
     # Move text_encode and vae to gpu.
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-    vae.to(accelerator.device, dtype=weight_dtype)
-    if not args.train_text_encoder:
+    vae.to(accelerator.device, dtype=torch.float32)
+    if not config.train_text_encoder:
         text_encoder.to(accelerator.device, dtype=weight_dtype)
 
-    if not args.not_cache_latents:
+    if cache_latents:
         latents_cache = []
         text_encoder_cache = []
         for batch in tqdm(train_dataloader, desc="Caching latents"):
             with torch.no_grad():
                 batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, non_blocking=True,
-                                                                 dtype=weight_dtype)
+                                                                 dtype=torch.float32)
                 batch["input_ids"] = batch["input_ids"].to(accelerator.device, non_blocking=True)
                 latents_cache.append(vae.encode(batch["pixel_values"]).latent_dist)
-                if args.train_text_encoder:
+                if config.train_text_encoder:
                     text_encoder_cache.append(batch["input_ids"])
                 else:
                     text_encoder_cache.append(encode_tokens(batch["input_ids"]))
@@ -405,34 +378,19 @@ def main(args):
                                                        shuffle=True)
 
         del vae
-        if not args.train_text_encoder:
+        if not config.train_text_encoder:
             del text_encoder
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+    use_epochs_as_criteria = False
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / config.gradient_accumulation_steps)
+    if args.train_n_steps is None:
+        args.train_n_steps = args.train_to_epochs * num_update_steps_per_epoch
+        use_epochs_as_criteria = True
 
-    if args.lr_cycles is None:
-        if args.lr_scheduler.lower() == "cosine":
-            args.lr_cycles = 0.5
-        if args.lr_scheduler.lower() == "cosine_with_restarts":
-            args.lr_cycles = 1
-
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
-        num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
-        num_cycles=args.lr_cycles,
-        last_epoch=args.last_epoch
-    )
-
-    if args.train_text_encoder:
+    if config.train_text_encoder:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler
         )
@@ -442,75 +400,78 @@ def main(args):
         )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / config.gradient_accumulation_steps)
+    if use_epochs_as_criteria:
+        args.train_n_steps = args.train_to_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    args.train_to_epochs = math.ceil(args.train_n_steps / num_update_steps_per_epoch)
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
+    wandb_enabled = False
     if accelerator.is_main_process:
-        accelerator.init_trackers("dreambooth")
+        if "wandb" in config.monitoring.monitors:
+            import wandb
+            wandb_enabled = True
+        accelerator.init_trackers(args.project, config=dict(config))
 
     # Train!
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = config.batch_size * accelerator.num_processes * config.gradient_accumulation_steps
 
-    logger.info("***** Running training *****")
+    logger.info("***** Info of This Run *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Train to epochs = {args.train_to_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {config.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Gradient Accumulation steps = {config.gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {args.train_n_steps}")
 
     @atexit.register
     def on_exit():
-        if args.save_min_steps < step < args.max_train_steps:
+        if config.saving.min_steps < local_steps < args.train_n_steps:
             print("Saving model...")
             on_step_end(from_interrupt=True)
 
     # Only show the progress bar once on each machine.
-    if overrode_max_train_steps:
-        main_progress = tqdm(total=args.num_train_epochs, unit="epoch", disable=not accelerator.is_local_main_process)
+    if use_epochs_as_criteria:
+        main_progress = tqdm(total=args.train_to_epochs, unit="epoch", disable=not accelerator.is_local_main_process)
         main_progress.set_description("Epochs")
     else:
-        main_progress = tqdm(total=args.max_train_steps, unit="step", disable=not accelerator.is_local_main_process)
+        main_progress = tqdm(total=args.train_n_steps, unit="step", disable=not accelerator.is_local_main_process)
         main_progress.set_description("Steps")
 
-    step = global_step = global_epoch = 0
-    text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
+    local_steps = global_steps = global_epochs = 0
+    text_enc_context = nullcontext() if config.train_text_encoder else torch.no_grad()
     epoch_saved = False
 
     def on_step_end(from_interrupt=False):
         nonlocal epoch_saved
 
         save_checkpoint = (from_interrupt or
-                           step > args.save_min_steps and
-                           step >= args.max_train_steps or
-                           args.save_interval is not None and global_step % args.save_interval == 0 or
-                           global_epoch > 0 and not epoch_saved and args.save_interval is None and
-                           global_epoch % args.save_interval_epochs == 0)
+                           local_steps > config.saving.min_steps and
+                           local_steps >= args.train_n_steps or
+                           "interval_steps" in config.saving and global_steps % config.saving.interval_steps == 0 or
+                           global_epochs > 0 and not epoch_saved and "interval_steps" not in config.saving and
+                           global_epochs % config.saving.interval_epochs == 0)
 
-        save_sample = (args.save_sample_prompt is not None and
+        save_sample = (any(config.sampling.concepts) and
                        save_checkpoint or
-                       args.sample_interval is not None and
-                       global_step % args.sample_interval == 0)
+                       global_steps % config.sampling.interval_steps == 0)
 
         if not (accelerator.is_main_process and save_sample):
             return
 
         # Create the pipeline using using the trained modules and save it.
 
-        if args.train_text_encoder:
+        if config.train_text_encoder:
             text_enc_model = accelerator.unwrap_model(text_encoder)
         else:
             text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
 
         unet_unwrapped = accelerator.unwrap_model(unet)
 
-        if args.save_unet_half:
+        if config.saving.unet_half:
             unet_unwrapped = copy.deepcopy(unet_unwrapped).half()
 
         pipeline = StableDiffusionPipeline.from_pretrained(
@@ -527,90 +488,98 @@ def main(args):
         )
 
         if save_checkpoint:
-            save_dir = run_output_dir / str(global_step)
+            save_dir = run_output_dir / str(global_steps)
             save_dir.mkdir()
             pipeline.save_pretrained(save_dir)
 
             state_dir = save_dir / "state"
             state_dir.mkdir()
 
-            with open(state_dir / "args.yaml", "w") as f:
-                yaml.dump(args.__dict__, f, Dumper, indent=2)
+            OmegaConf.save(config, state_dir / "config.yaml")
 
             torch.save({
                 'optimizer_state_dict': optimizer.state_dict(),
-                "global_steps": global_step,
-                'global_epoch': global_epoch,
+                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+                "global_steps": global_steps,
+                'global_epoch': global_epochs,
             }, state_dir / "state.pt")
 
             epoch_saved = True
 
             logger.info(f"[*] Checkpoint saved at {save_dir}")
 
-            if args.wandb and args.wandb_artifact:
-                model_artifact = wandb.Artifact('run_' + wandb.run.id + '_model', type='model', metadata={
-                    'epochs_trained': global_epoch + 1,
-                    'steps_trained': global_step,
-                    'project': run.project
+            wandb_config = config.monitoring.wandb
+            if accelerator.is_main_process and wandb_enabled and wandb_config.artifact:
+                wandb_run = accelerator.get_tracker("wandb")
+
+                model_artifact = wandb.Artifact('run_' + wandb_run.id + '_model', type='model', metadata={
+                    'epochs_trained': global_epochs + 1,
+                    'steps_trained': global_steps,
+                    'project': args.project
                 })
                 model_artifact.add_dir(str(save_dir))
-                wandb.log_artifact(model_artifact,
-                                   aliases=['latest', 'last', f'epoch {global_epoch + 1}'])
+                wandb_run.log_artifact(model_artifact,
+                                       aliases=['latest', 'last', f'epoch {global_epochs + 1}'])
 
-                if args.rm_after_wandb_saved:
+                if wandb_config.remove_ckpt_after_upload:
                     shutil.rmtree(save_dir)
 
         if save_sample:
             pipeline = pipeline.to(accelerator.device)
-            g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
             pipeline.set_progress_bar_config(disable=True)
             sample_dir = run_output_dir / "samples"
             sample_dir.mkdir(exist_ok=True)
             samples = []
-            with torch.autocast("cuda"), \
-                    torch.inference_mode(), \
-                    tqdm(total=args.n_save_sample + (args.n_save_sample % args.infer_batch_size),
-                         desc="Generating samples") as progress:
-                for _ in range(math.ceil(args.n_save_sample / args.infer_batch_size)):
-                    samples.extend(pipeline(
-                        prompt=args.save_sample_prompt,
-                        negative_prompt=args.save_sample_negative_prompt,
-                        guidance_scale=args.guidance_scale,
-                        num_inference_steps=args.infer_steps,
-                        num_images_per_prompt=args.infer_batch_size,
-                        generator=g_cuda).images)
-                    progress.update(args.infer_batch_size)
+            with torch.autocast("cuda"), torch.inference_mode():
+                for concept in tqdm(config.sampling.concepts, unit="concept"):
+                    g_cuda = torch.Generator(device=accelerator.device).manual_seed(concept.seed)
+                    concept_samples = []
+                    with tqdm(total=concept.num_samples + (concept.num_samples % config.sampling.batch_size),
+                              desc=f"Generating samples") as progress:
+
+                        for _ in range(math.ceil(concept.num_samples / config.sampling.batch_size)):
+                            concept_samples.extend(pipeline(
+                                prompt=concept.prompt,
+                                negative_prompt=concept.negative_prompt,
+                                guidance_scale=concept.cfg_scale,
+                                num_inference_steps=concept.steps,
+                                num_images_per_prompt=config.sampling.batch_size,
+                                generator=g_cuda).images)
+                            progress.update(config.sampling.batch_size)
+                    samples.append((concept.prompt, concept_samples))
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            for i, image in enumerate(samples):
-                image.save(sample_dir / f"{global_step}_{i}.png")
+            for i, (_, images) in enumerate(samples):
+                for j, image in enumerate(images):
+                    image.save(sample_dir / f"{global_steps}_{i}_{j}.png")
 
-            if args.wandb and args.wandb_sample and any(samples):
-                wandb.log({"samples": [wandb.Image(x) for x in samples]}, step=global_step, commit=False)
+            if wandb_enabled and config.monitoring.wandb.sample and any(samples):
+                log_samples = {"samples": {prompt: [wandb.Image(x) for x in images] for prompt, images in samples}}
+                accelerator.log(log_samples, global_steps, {"commit": False})
 
-    for epoch in range(args.num_train_epochs):
+    for epoch in range(args.train_to_epochs):
         epoch_saved = False
 
         unet.train()
-        if args.train_text_encoder:
+        if config.train_text_encoder:
             text_encoder.train()
 
-        global_epoch = base_epoch + epoch
+        global_epochs = base_epoch + epoch
 
         sub_progress = tqdm(train_dataloader, unit="batch",
-                            disable=not accelerator.is_local_main_process or not overrode_max_train_steps)
-        sub_progress.set_description(f"Epoch {global_epoch + 1}")
+                            disable=not accelerator.is_local_main_process or not use_epochs_as_criteria)
+        sub_progress.set_description(f"Epoch {global_epochs + 1}")
 
-        for batch in sub_progress:
+        for i, batch in enumerate(sub_progress):
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 with torch.no_grad():
-                    if not args.not_cache_latents:
+                    if cache_latents:
                         latent_dist = batch[0][0]
                     else:
-                        latent_dist = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist
+                        latent_dist = vae.encode(batch["pixel_values"].to(dtype=torch.float32)).latent_dist
                     latents = latent_dist.sample() * 0.18215
 
                 # Sample noise that we'll add to the latents
@@ -626,8 +595,8 @@ def main(args):
 
                 # Get the text embedding for conditioning
                 with text_enc_context:
-                    if not args.not_cache_latents:
-                        if args.train_text_encoder:
+                    if cache_latents:
+                        if config.train_text_encoder:
                             encoder_hidden_states = encode_tokens(batch[0][1])
                         else:
                             encoder_hidden_states = batch[0][1]
@@ -637,7 +606,7 @@ def main(args):
                 # Predict the noise residual
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-                if args.with_prior_preservation:
+                if config.prior_preservation.enabled:
                     # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
                     noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
                     noise, noise_prior = torch.chunk(noise, 2, dim=0)
@@ -649,31 +618,31 @@ def main(args):
                     prior_loss = F.mse_loss(noise_pred_prior.float(), noise_prior.float(), reduction="mean")
 
                     # Add the prior loss to the instance loss.
-                    loss = loss + args.prior_loss_weight * prior_loss
+                    loss = loss + config.prior_preservation.prior_loss_weight * prior_loss
                 else:
                     loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
                 accelerator.backward(loss)
-                if args.gradient_clipping and accelerator.sync_gradients:
+                if config.gradient_clipping.enabled and accelerator.sync_gradients:
                     params_to_clip = (
                         itertools.chain(unet.parameters(), text_encoder.parameters())
-                        if args.train_text_encoder
+                        if config.train_text_encoder
                         else unet.parameters()
                     )
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_clip, config.gradient_clipping.max_grad_norm)
                 optimizer.step()
-                lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                lr_scheduler.step(epoch + i / len(train_dataloader))
 
-            step += 1
-            global_step = base_step + step
+            local_steps += 1
+            global_steps = base_step + local_steps
 
-            logs = {"epoch": global_epoch + 1, "loss": loss.detach_().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"epoch": global_epochs + 1, "loss": loss.detach_().item(), "lr": lr_scheduler.get_lr()[0]}
 
-            if overrode_max_train_steps:
+            if use_epochs_as_criteria:
                 l = logs.copy()
                 del l["epoch"]
-                l["total_steps"] = step
+                l["total_steps"] = local_steps
                 sub_progress.set_postfix(**l)
             else:
                 main_progress.update()
@@ -681,18 +650,18 @@ def main(args):
 
             on_step_end()
 
-            accelerator.log(logs, step=global_step)
+            accelerator.log(logs, step=global_steps)
 
-            if step >= args.max_train_steps:
+            if local_steps >= args.train_n_steps:
                 break
 
         accelerator.wait_for_everyone()
 
-        if overrode_max_train_steps:
+        if use_epochs_as_criteria:
             main_progress.update()
 
     accelerator.end_training()
 
 
 if __name__ == "__main__":
-    main(parse_args())
+    main(*get_params())
