@@ -235,9 +235,10 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
 
         return Transformer2DModelOutput(sample=output)
 
-    # def _set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool):
-    #     for block in self.transformer_blocks:
-    #         block._set_use_memory_efficient_attention_xformers(use_memory_efficient_attention_xformers)
+    def _set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool):
+        raise NotImplementedError()
+        # for block in self.transformer_blocks:
+        #     block._set_use_memory_efficient_attention_xformers(use_memory_efficient_attention_xformers)
 
 
 class AttentionBlock(nn.Module):
@@ -454,9 +455,7 @@ class CrossAttention(nn.Module):
                 self.dim_head % 8) == 0 and flash_attn_installed:
             self.flash_attn = FlashAttention(self.scale)
 
-        self.to_out = nn.ModuleList([])
-        self.to_out.append(nn.Linear(inner_dim, query_dim))
-        self.to_out.append(nn.Dropout(dropout))
+        self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
 
     def reshape_heads_to_batch_dim(self, tensor):
         batch_size, seq_len, dim = tensor.shape
@@ -497,12 +496,13 @@ class CrossAttention(nn.Module):
         else:
             hidden_states = self._sliced_attention(query, key, value, sequence_length, dim)
 
-        hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
-        # linear proj
-        hidden_states = self.to_out[0](hidden_states)
-        # dropout
-        hidden_states = self.to_out[1](hidden_states)
-        return hidden_states
+        # hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+        # # linear proj
+        # hidden_states = self.to_out[0](hidden_states)
+        # # dropout
+        # hidden_states = self.to_out[1](hidden_states)
+        # return hidden_states
+        return self.to_out(hidden_states)
 
     def _attention(self, query, key, value):
         batch_size = query.shape[0]

@@ -33,7 +33,6 @@ logging.basicConfig(level="INFO")
 logger = get_logger("DB")
 
 
-
 def get_params():
     args = parser.parse_args()
     config = None
@@ -96,7 +95,6 @@ def generate_class_images(concepts, args, noise_scheduler, accelerator):
             )
             pipeline.set_progress_bar_config(disable=True)
             pipeline.to(accelerator.device)
-            pipeline.enable_xformers_memory_efficient_attention()
 
         sample_dataset = PromptDataset([concept.class_set.prompt, autogen_config.negative_prompt], num_new_images)
         sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=autogen_config.batch_size)
@@ -263,7 +261,6 @@ def main(args, config):
         args.pretrained_model_name_or_path,
         subfolder="unet"
     )
-    unet.set_use_memory_efficient_attention_xformers(True)
 
     vae.requires_grad_(False)
     if not config.train_text_encoder:
@@ -529,7 +526,6 @@ def main(args, config):
         if save_sample:
             pipeline = pipeline.to(accelerator.device)
             pipeline.set_progress_bar_config(disable=True)
-            pipeline.enable_xformers_memory_efficient_attention()
             sample_dir = run_output_dir / "samples"
             sample_dir.mkdir(exist_ok=True)
             samples = []
