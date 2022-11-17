@@ -19,7 +19,6 @@ import os
 
 import torch
 
-
 try:
     from omegaconf import OmegaConf
 except ImportError:
@@ -37,8 +36,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.pipelines.latent_diffusion.pipeline_latent_diffusion import LDMBertConfig, LDMBertModel
-from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
-from transformers import AutoFeatureExtractor, BertTokenizerFast, CLIPTextModel, CLIPTokenizer
+from transformers import BertTokenizerFast, CLIPTextModel, CLIPTokenizer
 
 
 def shave_segments(path, n_shave_prefix_segments=1):
@@ -761,4 +759,4 @@ if __name__ == "__main__":
 
     pipe.save_pretrained(args.dump_path)
 
-    print('Convert succeed')
+    print("SD -> Diffusers done")
