@@ -21,11 +21,11 @@ import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
-from diffusers.optimization import get_scheduler
 from modules.args import parser
 from modules.datasets import DreamBoothDataset, PromptDataset, LatentsDataset
 
@@ -486,19 +486,24 @@ def main(args):
     def on_step_end(from_interrupt=False):
         nonlocal epoch_saved
 
-        save_checkpoint = (from_interrupt or
-                           step > args.save_min_steps and
-                           step >= args.max_train_steps or
-                           args.save_interval is not None and global_step % args.save_interval == 0 or
-                           global_epoch > 0 and not epoch_saved and args.save_interval is None and
-                           global_epoch % args.save_interval_epochs == 0)
+        saving_because_steps = (step >= args.max_train_steps or
+                                (args.save_interval is not None and
+                                 global_step % args.save_interval == 0))
+
+        saving_because_epochs = (args.save_interval is None and
+                                 global_step > 0 and not epoch_saved and
+                                 global_step % args.save_interval_epochs == 0)
+
+        save_checkpoint = (step >= args.save_min_steps and
+                           (from_interrupt or
+                            saving_because_steps or
+                            saving_because_epochs))
 
         save_sample = (args.save_sample_prompt is not None and
-                       save_checkpoint or
                        args.sample_interval is not None and
                        global_step % args.sample_interval == 0)
 
-        if not (accelerator.is_main_process and save_sample):
+        if not (accelerator.is_main_process and (save_checkpoint or save_sample)):
             return
 
         # Create the pipeline using using the trained modules and save it.
