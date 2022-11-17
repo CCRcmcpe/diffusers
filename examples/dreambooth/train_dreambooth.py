@@ -19,11 +19,11 @@ import torch.utils.data
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from diffusers import AutoencoderKL, DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from modules.args import parser
 from modules.datasets import DreamBoothDataset, PromptDataset, LatentsDataset
 
@@ -450,18 +450,23 @@ def main(args, config):
     def on_step_end(from_interrupt=False):
         nonlocal epoch_saved
 
-        save_checkpoint = (from_interrupt or
-                           local_steps > config.saving.min_steps and
-                           local_steps >= args.train_n_steps or
-                           "interval_steps" in config.saving and global_steps % config.saving.interval_steps == 0 or
-                           global_epochs > 0 and not epoch_saved and "interval_steps" not in config.saving and
-                           global_epochs % config.saving.interval_epochs == 0)
+        saving_because_steps = (local_steps >= args.train_n_steps or
+                                (config.get("saving.interval_steps") is not None and
+                                 global_steps % config.saving.interval_steps == 0))
+
+        saving_because_epochs = (config.get("saving.interval_steps") is None and
+                                 global_epochs > 0 and not epoch_saved and
+                                 global_epochs % config.saving.interval_epochs == 0)
+
+        save_checkpoint = (local_steps >= config.saving.min_steps and
+                           (from_interrupt or
+                            saving_because_steps or
+                            saving_because_epochs))
 
         save_sample = (any(config.sampling.concepts) and
-                       save_checkpoint or
                        global_steps % config.sampling.interval_steps == 0)
 
-        if not (accelerator.is_main_process and save_sample):
+        if not (accelerator.is_main_process and (save_checkpoint or save_sample)):
             return
 
         # Create the pipeline using using the trained modules and save it.
