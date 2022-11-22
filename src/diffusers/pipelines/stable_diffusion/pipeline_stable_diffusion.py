@@ -2,10 +2,11 @@ import inspect
 from typing import Callable, List, Optional, Union
 
 import torch
-
-from diffusers.utils import is_accelerate_available
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
+from diffusers.utils import is_accelerate_available
+from . import StableDiffusionPipelineOutput
+from .safety_checker import StableDiffusionSafetyChecker
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...pipeline_utils import DiffusionPipeline
@@ -17,9 +18,6 @@ from ...schedulers import (
     PNDMScheduler,
 )
 from ...utils import deprecate, logging
-from . import StableDiffusionPipelineOutput
-from .safety_checker import StableDiffusionSafetyChecker
-
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -385,8 +383,13 @@ class StableDiffusionPipeline(DiffusionPipeline):
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
+            latent_model_input = latent_model_input.to(self.unet.dtype)
+            text_embeddings = text_embeddings.to(self.unet.dtype)
+
             # predict the noise residual
             noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+
+            noise_pred = noise_pred.to(latents.dtype)
 
             # perform guidance
             if do_classifier_free_guidance:
