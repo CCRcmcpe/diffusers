@@ -6,6 +6,5 @@ omegaconf~=2.2
 einops~=0.5
 pytorch-lightning~=1.8
 numpy~=1.21
-PyYAML~=6.0
 Pillow~=9.3
 tqdm~=4.64

@@ -251,7 +251,7 @@ if __name__ == "__main__":
         # Convert the VAE model
         vae_state_dict = torch.load(vae_path, map_location="cpu")
         vae_state_dict = convert_vae_state_dict(vae_state_dict)
-        vae_state_dict = {"first_stage_model." + k: v.to(DTYPE_MAP[args.unet_dtype])
+        vae_state_dict = {"first_stage_model." + k: v.to(DTYPE_MAP[args.vae_dtype])
                           for k, v in vae_state_dict.items()}
 
     text_enc_dict = {}
@@ -259,7 +259,7 @@ if __name__ == "__main__":
         # Convert the text encoder model
         text_enc_dict = torch.load(text_enc_path, map_location="cpu")
         text_enc_dict = convert_text_enc_state_dict(text_enc_dict)
-        text_enc_dict = {"cond_stage_model.transformer." + k: v.to(DTYPE_MAP[args.unet_dtype])
+        text_enc_dict = {"cond_stage_model.transformer." + k: v.to(DTYPE_MAP[args.text_encoder_dtype])
                          for k, v in text_enc_dict.items()}
 
     # Put together new checkpoint
@@ -268,3 +268,5 @@ if __name__ == "__main__":
 
     with open(args.checkpoint_path, 'wb' if args.overwrite else 'xb') as f:
         torch.save(state_dict, f)
+
+    print("Diffusers -> SD done")
