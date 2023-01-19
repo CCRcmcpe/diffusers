@@ -12,16 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..modeling_utils import ModelMixin
+from ..loaders import UNet2DConditionLoadersMixin
 from ..utils import BaseOutput, logging
+from .cross_attention import AttnProcessor
 from .embeddings import TimestepEmbedding, Timesteps
+from .modeling_utils import ModelMixin
 from .unet_2d_blocks import (
     CrossAttnDownBlock2D,
     CrossAttnUpBlock2D,
@@ -48,7 +50,7 @@ class UNet2DConditionOutput(BaseOutput):
     sample: torch.FloatTensor
 
 
-class UNet2DConditionModel(ModelMixin, ConfigMixin):
+class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
     r"""
     UNet2DConditionModel is a conditional 2D UNet model that takes in a noisy sample, conditional state, and a timestep
     and returns sample shaped output.
@@ -265,6 +267,60 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         self.conv_act = nn.SiLU()
         self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
+    @property
+    def attn_processors(self) -> Dict[str, AttnProcessor]:
+        r"""
+        Returns:
+            `dict` of attention processors: A dictionary containing all attention processors used in the model with
+            indexed by its weight name.
+        """
+        # set recursively
+        processors = {}
+
+        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttnProcessor]):
+            if hasattr(module, "set_processor"):
+                processors[f"{name}.processor"] = module.processor
+
+            for sub_name, child in module.named_children():
+                fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
+
+            return processors
+
+        for name, module in self.named_children():
+            fn_recursive_add_processors(name, module, processors)
+
+        return processors
+
+    def set_attn_processor(self, processor: Union[AttnProcessor, Dict[str, AttnProcessor]]):
+        r"""
+        Parameters:
+            `processor (`dict` of `AttnProcessor` or `AttnProcessor`):
+                The instantiated processor class or a dictionary of processor classes that will be set as the processor
+                of **all** `CrossAttention` layers.
+            In case `processor` is a dict, the key needs to define the path to the corresponding cross attention processor. This is strongly recommended when setting trainablae attention processors.:
+
+        """
+        count = len(self.attn_processors.keys())
+
+        if isinstance(processor, dict) and len(processor) != count:
+            raise ValueError(
+                f"A dict of processors was passed, but the number of processors {len(processor)} does not match the"
+                f" number of attention layers: {count}. Please make sure to pass {count} processor classes."
+            )
+
+        def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
+            if hasattr(module, "set_processor"):
+                if not isinstance(processor, dict):
+                    module.set_processor(processor)
+                else:
+                    module.set_processor(processor.pop(f"{name}.processor"))
+
+            for sub_name, child in module.named_children():
+                fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
+
+        for name, module in self.named_children():
+            fn_recursive_attn_processor(name, module, processor)
+
     def set_attention_slice(self, slice_size):
         r"""
         Enable sliced attention computation.
@@ -341,6 +397,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
         encoder_hidden_states: torch.Tensor,
         class_labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> Union[UNet2DConditionOutput, Tuple]:
         r"""
@@ -426,6 +483,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                     temb=emb,
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
+                    cross_attention_kwargs=cross_attention_kwargs,
                 )
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
@@ -434,7 +492,11 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
 
         # 4. mid
         sample = self.mid_block(
-            sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+            sample,
+            emb,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            cross_attention_kwargs=cross_attention_kwargs,
         )
 
         # 5. up
@@ -455,6 +517,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin):
                     temb=emb,
                     res_hidden_states_tuple=res_samples,
                     encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
                 )

@@ -8,6 +8,10 @@ import re
 
 import torch
 
+from safetensors.torch import save_file
+
+
+
 # =================#
 # UNet Conversion #
 # =================#
@@ -292,6 +296,9 @@ if __name__ == "__main__":
                         help="Save VAE weights in this precision. (other than fp32 NOT RECOMMENDED)")
 
     parser.add_argument("--overwrite", action="store_true", help="Overwrite destination.")
+    parser.add_argument(
+        "--use_safetensors", action="store_true", help="Save weights use safetensors, default is ckpt."
+    )
 
     args = parser.parse_args()
 
@@ -340,9 +347,12 @@ if __name__ == "__main__":
 
     # Put together new checkpoint
     state_dict = {**unet_state_dict, **vae_state_dict, **text_enc_dict}
-    state_dict = {"state_dict": state_dict}
+	
+	if args.use_safetensors:
+        save_file(state_dict, args.checkpoint_path)
+    else:
+		with open(args.checkpoint_path, 'wb' if args.overwrite else 'xb') as f:
+        	torch.save({"state_dict": state_dict}, f)
 
-    with open(args.checkpoint_path, 'wb' if args.overwrite else 'xb') as f:
-        torch.save(state_dict, f)
 
     print("Diffusers -> SD done")

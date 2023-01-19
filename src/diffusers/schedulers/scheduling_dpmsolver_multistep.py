@@ -21,8 +21,8 @@ import numpy as np
 import torch
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..utils import _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS, deprecate
-from .scheduling_utils import SchedulerMixin, SchedulerOutput
+from ..utils import deprecate
+from .scheduling_utils import KarrasDiffusionSchedulers, SchedulerMixin, SchedulerOutput
 
 
 def betas_for_alpha_bar(num_diffusion_timesteps, max_beta=0.999):
@@ -117,7 +117,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
 
     """
 
-    _compatibles = _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS.copy()
+    _compatibles = [e.name for e in KarrasDiffusionSchedulers]
     _deprecated_kwargs = ["predict_epsilon"]
     order = 1
 
@@ -143,7 +143,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             "Please make sure to instantiate your scheduler with `prediction_type` instead. E.g. `scheduler ="
             " DPMSolverMultistepScheduler.from_pretrained(<model_id>, prediction_type='epsilon')`."
         )
-        predict_epsilon = deprecate("predict_epsilon", "0.12.0", message, take_from=kwargs)
+        predict_epsilon = deprecate("predict_epsilon", "0.13.0", message, take_from=kwargs)
         if predict_epsilon is not None:
             self.register_to_config(prediction_type="epsilon" if predict_epsilon else "sample")
 
@@ -174,9 +174,15 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
 
         # settings for DPM-Solver
         if algorithm_type not in ["dpmsolver", "dpmsolver++"]:
-            raise NotImplementedError(f"{algorithm_type} does is not implemented for {self.__class__}")
+            if algorithm_type == "deis":
+                algorithm_type = "dpmsolver++"
+            else:
+                raise NotImplementedError(f"{algorithm_type} does is not implemented for {self.__class__}")
         if solver_type not in ["midpoint", "heun"]:
-            raise NotImplementedError(f"{solver_type} does is not implemented for {self.__class__}")
+            if solver_type == "logrho":
+                solver_type = "midpoint"
+            else:
+                raise NotImplementedError(f"{solver_type} does is not implemented for {self.__class__}")
 
         # setable values
         self.num_inference_steps = None

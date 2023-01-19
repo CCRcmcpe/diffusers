@@ -80,7 +80,7 @@ from setuptools import find_packages, setup
 _deps = [
     "Pillow",  # keep the PIL.Image.Resampling deprecation away
     "accelerate>=0.11.0",
-    "black==22.8",
+    "black==22.12",
     "datasets",
     "filelock",
     "flake8>=3.8.3",
@@ -91,7 +91,7 @@ _deps = [
     "isort>=5.5.4",
     "jax>=0.2.8,!=0.3.2",
     "jaxlib>=0.1.65",
-    "k-diffusion",
+    "k-diffusion>=0.0.12",
     "librosa",
     "modelcards>=0.1.4",
     "numpy",
@@ -218,7 +218,7 @@ install_requires = [
 
 setup(
     name="diffusers",
-    version="0.11.1",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
+    version="0.12.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     description="Diffusers",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",

@@ -1,14 +1,16 @@
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from ...configuration_utils import ConfigMixin, register_to_config
-from ...modeling_utils import ModelMixin
-from ...models.attention import CrossAttention, DualTransformer2DModel, Transformer2DModel
+from ...models import ModelMixin
+from ...models.attention import CrossAttention
+from ...models.cross_attention import AttnProcessor, CrossAttnAddedKVProcessor
+from ...models.dual_transformer_2d import DualTransformer2DModel
 from ...models.embeddings import TimestepEmbedding, Timesteps
-from ...models.unet_2d_blocks import UNetMidBlock2DSimpleCrossAttn as UNetMidBlockFlatSimpleCrossAttn
+from ...models.transformer_2d import Transformer2DModel
 from ...models.unet_2d_condition import UNet2DConditionOutput
 from ...utils import logging
 
@@ -351,6 +353,60 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         self.conv_act = nn.SiLU()
         self.conv_out = LinearMultiDim(block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
+    @property
+    def attn_processors(self) -> Dict[str, AttnProcessor]:
+        r"""
+        Returns:
+            `dict` of attention processors: A dictionary containing all attention processors used in the model with
+            indexed by its weight name.
+        """
+        # set recursively
+        processors = {}
+
+        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttnProcessor]):
+            if hasattr(module, "set_processor"):
+                processors[f"{name}.processor"] = module.processor
+
+            for sub_name, child in module.named_children():
+                fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
+
+            return processors
+
+        for name, module in self.named_children():
+            fn_recursive_add_processors(name, module, processors)
+
+        return processors
+
+    def set_attn_processor(self, processor: Union[AttnProcessor, Dict[str, AttnProcessor]]):
+        r"""
+        Parameters:
+            `processor (`dict` of `AttnProcessor` or `AttnProcessor`):
+                The instantiated processor class or a dictionary of processor classes that will be set as the processor
+                of **all** `CrossAttention` layers.
+            In case `processor` is a dict, the key needs to define the path to the corresponding cross attention processor. This is strongly recommended when setting trainablae attention processors.:
+
+        """
+        count = len(self.attn_processors.keys())
+
+        if isinstance(processor, dict) and len(processor) != count:
+            raise ValueError(
+                f"A dict of processors was passed, but the number of processors {len(processor)} does not match the"
+                f" number of attention layers: {count}. Please make sure to pass {count} processor classes."
+            )
+
+        def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
+            if hasattr(module, "set_processor"):
+                if not isinstance(processor, dict):
+                    module.set_processor(processor)
+                else:
+                    module.set_processor(processor.pop(f"{name}.processor"))
+
+            for sub_name, child in module.named_children():
+                fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
+
+        for name, module in self.named_children():
+            fn_recursive_attn_processor(name, module, processor)
+
     def set_attention_slice(self, slice_size):
         r"""
         Enable sliced attention computation.
@@ -427,6 +483,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
         encoder_hidden_states: torch.Tensor,
         class_labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> Union[UNet2DConditionOutput, Tuple]:
         r"""
@@ -512,6 +569,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
                     temb=emb,
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
+                    cross_attention_kwargs=cross_attention_kwargs,
                 )
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
@@ -520,7 +578,11 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
 
         # 4. mid
         sample = self.mid_block(
-            sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+            sample,
+            emb,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            cross_attention_kwargs=cross_attention_kwargs,
         )
 
         # 5. up
@@ -541,6 +603,7 @@ class UNetFlatConditionModel(ModelMixin, ConfigMixin):
                     temb=emb,
                     res_hidden_states_tuple=res_samples,
                     encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
                 )
@@ -840,7 +903,9 @@ class CrossAttnDownBlockFlat(nn.Module):
 
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None):
+    def forward(
+        self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
+    ):
         # TODO(Patrick, William) - attention mask is not used
         output_states = ()
 
@@ -861,10 +926,15 @@ class CrossAttnDownBlockFlat(nn.Module):
                     create_custom_forward(attn, return_dict=False),
                     hidden_states,
                     encoder_hidden_states,
+                    cross_attention_kwargs,
                 )[0]
             else:
                 hidden_states = resnet(hidden_states, temb)
-                hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
+                hidden_states = attn(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                ).sample
 
             output_states += (hidden_states,)
 
@@ -1042,6 +1112,7 @@ class CrossAttnUpBlockFlat(nn.Module):
         res_hidden_states_tuple,
         temb=None,
         encoder_hidden_states=None,
+        cross_attention_kwargs=None,
         upsample_size=None,
         attention_mask=None,
     ):
@@ -1068,10 +1139,15 @@ class CrossAttnUpBlockFlat(nn.Module):
                     create_custom_forward(attn, return_dict=False),
                     hidden_states,
                     encoder_hidden_states,
+                    cross_attention_kwargs,
                 )[0]
             else:
                 hidden_states = resnet(hidden_states, temb)
-                hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
+                hidden_states = attn(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                ).sample
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -1166,18 +1242,23 @@ class UNetMidBlockFlatCrossAttn(nn.Module):
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
-    def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None):
-        # TODO(Patrick, William) - attention_mask is currently not used. Implement once used
+    def forward(
+        self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
+    ):
         hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
-            hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
+            hidden_states = attn(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                cross_attention_kwargs=cross_attention_kwargs,
+            ).sample
             hidden_states = resnet(hidden_states, temb)
 
         return hidden_states
 
 
-# Copied from diffusers.models.unet_2d_blocks.UNetMidBlock2DSimpleCrossAttn with UNetMidBlock2DSimpleCrossAttn->UNetMidBlockFlatCrossAttn, ResnetBlock2D->ResnetBlockFlat
-class UnCLIPUNetMidBlockFlatCrossAttn(nn.Module):
+# Copied from diffusers.models.unet_2d_blocks.UNetMidBlock2DSimpleCrossAttn with UNetMidBlock2DSimpleCrossAttn->UNetMidBlockFlatSimpleCrossAttn, ResnetBlock2D->ResnetBlockFlat
+class UNetMidBlockFlatSimpleCrossAttn(nn.Module):
     def __init__(
         self,
         in_channels: int,
@@ -1230,6 +1311,7 @@ class UnCLIPUNetMidBlockFlatCrossAttn(nn.Module):
                     norm_num_groups=resnet_groups,
                     bias=True,
                     upcast_softmax=True,
+                    processor=CrossAttnAddedKVProcessor(),
                 )
             )
             resnets.append(
@@ -1250,19 +1332,19 @@ class UnCLIPUNetMidBlockFlatCrossAttn(nn.Module):
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
-    def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None):
+    def forward(
+        self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
+    ):
+        cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
         hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             # attn
-            residual = hidden_states
-            hidden_states = hidden_states.view(hidden_states.shape[0], hidden_states.shape[1], -1).transpose(1, 2)
             hidden_states = attn(
                 hidden_states,
-                encoder_hidden_states=encoder_hidden_states.transpose(1, 2),
+                encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
+                **cross_attention_kwargs,
             )
-            hidden_states = hidden_states.transpose(-1, -2).reshape(residual.shape)
-            hidden_states = hidden_states + residual
 
             # resnet
             hidden_states = resnet(hidden_states, temb)
