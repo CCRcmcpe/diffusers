@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-
 from transformers import PretrainedConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput
@@ -182,7 +181,7 @@ class LDMTextToImagePipeline(DiffusionPipeline):
             latents = self.scheduler.step(noise_pred, t, latents, **extra_kwargs).prev_sample
 
         # scale and decode the image latents with vae
-        latents = 1 / 0.18215 * latents
+        latents = 1 / self.vqvae.config.scaling_factor * latents
         image = self.vqvae.decode(latents).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)

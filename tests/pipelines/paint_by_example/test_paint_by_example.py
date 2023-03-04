@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2023 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,14 +19,15 @@ import unittest
 
 import numpy as np
 import torch
+from PIL import Image
+from transformers import CLIPImageProcessor, CLIPVisionConfig
 
 from diffusers import AutoencoderKL, PaintByExamplePipeline, PNDMScheduler, UNet2DConditionModel
 from diffusers.pipelines.paint_by_example import PaintByExampleImageEncoder
 from diffusers.utils import floats_tensor, load_image, slow, torch_device
 from diffusers.utils.testing_utils import require_torch_gpu
-from PIL import Image
-from transformers import CLIPImageProcessor, CLIPVisionConfig
 
+from ...pipeline_params import IMAGE_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS, IMAGE_GUIDED_IMAGE_INPAINTING_PARAMS
 from ...test_pipelines_common import PipelineTesterMixin
 
 
@@ -35,12 +36,8 @@ torch.backends.cuda.matmul.allow_tf32 = False
 
 class PaintByExamplePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
     pipeline_class = PaintByExamplePipeline
-
-    def tearDown(self):
-        # clean up the VRAM after each test
-        super().tearDown()
-        gc.collect()
-        torch.cuda.empty_cache()
+    params = IMAGE_GUIDED_IMAGE_INPAINTING_PARAMS
+    batch_params = IMAGE_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS
 
     def get_dummy_components(self):
         torch.manual_seed(0)
